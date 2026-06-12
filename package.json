@@ -8,6 +8,7 @@
   },
   "scripts": {
     "kl": "tsx src/cli/kl.ts",
+    "dev": "next dev",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test:unit": "vitest run",
@@ -28,6 +29,9 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0",
-    "drizzle-orm": "^0.45.2"
+    "drizzle-orm": "^0.45.2",
+    "next": "16.3.0-canary.49",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   }
 }

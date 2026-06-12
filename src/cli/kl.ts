@@ -19,6 +19,7 @@ import {
   runPersistentMockIngest,
   type PersistentMockIngestSummary
 } from "../engine/persistent-ingest.js";
+import { createPersistentDailyPlan, type PersistentDailyPlan } from "../engine/persistent-plan.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -43,11 +44,19 @@ export interface KlPersistentIngestCommandResult {
 
 export type KlIngestCommandResult = KlMockIngestCommandResult | KlPersistentIngestCommandResult;
 
-export interface KlPlanCommandResult {
+export interface KlMockPlanCommandResult {
   command: "plan";
   mode: "mock";
   result: DailyPlan;
 }
+
+export interface KlPersistentPlanCommandResult {
+  command: "plan";
+  mode: "mock-persistent";
+  result: PersistentDailyPlan;
+}
+
+export type KlPlanCommandResult = KlMockPlanCommandResult | KlPersistentPlanCommandResult;
 
 export interface KlQuizCommandResult {
   command: "quiz";
@@ -116,8 +125,28 @@ async function runIngestCommand(args: readonly string[]): Promise<KlIngestComman
 }
 
 function runPlanCommand(args: readonly string[]): KlPlanCommandResult {
-  const options = parseOptions(args, new Set(["--date", "--concept"]), "plan");
+  const options = parseOptions(args, new Set(["--date", "--concept", "--db"]), "plan");
   const date = requireOne(options, "--date", "plan");
+  const dbPath = optionalOne(options, "--db", "plan");
+
+  if (dbPath !== undefined) {
+    if ((options.get("--concept") ?? []).length > 0) {
+      throw new UsageError("Command plan cannot combine --db and --concept.");
+    }
+
+    const db = new Database(dbPath);
+    try {
+      applyMigrations(db);
+      return {
+        command: "plan",
+        mode: "mock-persistent",
+        result: createPersistentDailyPlan(db, { date })
+      };
+    } finally {
+      db.close();
+    }
+  }
+
   const concepts = requireMany(options, "--concept", "plan").map(parseConcept);
 
   return {

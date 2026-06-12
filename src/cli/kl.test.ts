@@ -8,6 +8,7 @@ import { describe, expect, test } from "vitest";
 import { createPage, createSourceWithChunk, recordMasteryUpdate } from "../db/content-store.js";
 import { createConcept, type ConceptStatus } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
+import { persistTraceEvent } from "../db/trace-store.js";
 import {
   handleKlCommand,
   type KlCommandResult,
@@ -47,7 +48,27 @@ type CountableTable =
   | "attempts"
   | "teachbacks"
   | "mastery"
-  | "reviews";
+  | "reviews"
+  | "trace_events";
+
+interface TraceCliCommandResult {
+  command: "trace";
+  mode: "mock-persistent";
+  result: {
+    runId: string;
+    stage?: string;
+    eventCount: number;
+    events: Array<{
+      id: number;
+      runId: string;
+      stage: string;
+      level: string;
+      message: string;
+      timestamp: string;
+      data: unknown;
+    }>;
+  };
+}
 
 function countRows(dbPath: string, table: CountableTable): number {
   const db = new Database(dbPath, { readonly: true });
@@ -149,6 +170,43 @@ function createTeachbackDb(input: {
   return dbPath;
 }
 
+function createTraceDb(): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-trace-db-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    persistTraceEvent(db, {
+      runId: "run-alpha",
+      stage: "chunk",
+      level: "info",
+      message: "Chunked source",
+      timestamp: "2026-06-12T00:00:00.000Z",
+      data: { source: "alpha.md", chunks: 2 }
+    });
+    persistTraceEvent(db, {
+      runId: "run-beta",
+      stage: "chunk",
+      level: "warn",
+      message: "Skipped empty source",
+      timestamp: "2026-06-12T00:01:00.000Z",
+      data: { source: "beta.md" }
+    });
+    persistTraceEvent(db, {
+      runId: "run-alpha",
+      stage: "plan",
+      level: "info",
+      message: "Created study plan",
+      timestamp: "2026-06-12T00:02:00.000Z",
+      data: ["learn", "quiz"]
+    });
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
 function readQuizRows(dbPath: string): {
   items: Array<{ id: number; conceptSlug: string; statement: string; answerSpec: unknown }>;
   attempts: Array<{ id: number; itemId: number; response: string; verdict: string; gradingMethod: string }>;
@@ -230,7 +288,8 @@ function countMutableRows(dbPath: string): Record<CountableTable, number> {
     attempts: countRows(dbPath, "attempts"),
     teachbacks: countRows(dbPath, "teachbacks"),
     mastery: countRows(dbPath, "mastery"),
-    reviews: countRows(dbPath, "reviews")
+    reviews: countRows(dbPath, "reviews"),
+    trace_events: countRows(dbPath, "trace_events")
   };
 }
 
@@ -254,7 +313,180 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose as an expected command", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace/
+    );
+  });
+
+  test("trace returns persisted events for a run in insertion order and writes JSON", async () => {
+    const dbPath = createTraceDb();
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(["trace", "--db", dbPath, "--run", "run-alpha"], {
+      stdout: stdout.sink
+    })) as unknown as TraceCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toEqual({
+      command: "trace",
+      mode: "mock-persistent",
+      result: {
+        runId: "run-alpha",
+        eventCount: 2,
+        events: [
+          {
+            id: 1,
+            runId: "run-alpha",
+            stage: "chunk",
+            level: "info",
+            message: "Chunked source",
+            timestamp: "2026-06-12T00:00:00.000Z",
+            data: { source: "alpha.md", chunks: 2 }
+          },
+          {
+            id: 3,
+            runId: "run-alpha",
+            stage: "plan",
+            level: "info",
+            message: "Created study plan",
+            timestamp: "2026-06-12T00:02:00.000Z",
+            data: ["learn", "quiz"]
+          }
+        ]
+      }
+    });
+  });
+
+  test("trace filters persisted events by stage", async () => {
+    const dbPath = createTraceDb();
+
+    const result = (await handleKlCommand([
+      "trace",
+      "--db",
+      dbPath,
+      "--run",
+      "run-alpha",
+      "--stage",
+      "plan"
+    ])) as unknown as TraceCliCommandResult;
+
+    expect(result).toEqual({
+      command: "trace",
+      mode: "mock-persistent",
+      result: {
+        runId: "run-alpha",
+        stage: "plan",
+        eventCount: 1,
+        events: [
+          {
+            id: 3,
+            runId: "run-alpha",
+            stage: "plan",
+            level: "info",
+            message: "Created study plan",
+            timestamp: "2026-06-12T00:02:00.000Z",
+            data: ["learn", "quiz"]
+          }
+        ]
+      }
+    });
+  });
+
+  test("trace returns an empty event list when a run has no persisted events", async () => {
+    const dbPath = createTraceDb();
+
+    const result = (await handleKlCommand(["trace", "--db", dbPath, "--run", "run-missing"])) as unknown as TraceCliCommandResult;
+
+    expect(result).toEqual({
+      command: "trace",
+      mode: "mock-persistent",
+      result: {
+        runId: "run-missing",
+        eventCount: 0,
+        events: []
+      }
+    });
+  });
+
+  test("trace is read-only from the CLI", async () => {
+    const dbPath = createTraceDb();
+    const beforeRows = countMutableRows(dbPath);
+
+    await handleKlCommand(["trace", "--db", dbPath, "--run", "run-alpha", "--stage", "chunk"]);
+
+    expect(countMutableRows(dbPath)).toEqual(beforeRows);
+  });
+
+  test("trace rejects a missing db without creating it", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-trace-missing-")), "missing.db");
+
+    await expect(handleKlCommand(["trace", "--db", missingDbPath, "--run", "run-alpha"])).rejects.toThrow();
+
+    expect(existsSync(missingDbPath)).toBe(false);
+  });
+
+  test("trace rejects an unmigrated db without writing schema", async () => {
+    const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-trace-unmigrated-"));
+    const dbPath = path.join(dbDir, "empty.db");
+    const db = new Database(dbPath);
+    db.close();
+
+    await expect(handleKlCommand(["trace", "--db", dbPath, "--run", "run-alpha"])).rejects.toThrow();
+
+    expect(listTableNames(dbPath)).toEqual([]);
+  });
+
+  test("trace rejects missing and duplicate db run and stage options", async () => {
+    const dbPath = createTraceDb();
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["trace", "--run", "run-alpha"])).rejects.toThrow(/requires exactly one --db/);
+    await expect(handleKlCommand(["trace", "--db"])).rejects.toThrow(/Option --db for trace requires a value/);
+    await expect(
+      handleKlCommand(["trace", "--db", dbPath, "--db", otherDbPath, "--run", "run-alpha"])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(handleKlCommand(["trace", "--db", dbPath])).rejects.toThrow(/requires exactly one --run/);
+    await expect(handleKlCommand(["trace", "--db", dbPath, "--run"])).rejects.toThrow(
+      /Option --run for trace requires a value/
+    );
+    await expect(
+      handleKlCommand(["trace", "--db", dbPath, "--run", "run-alpha", "--run", "run-beta"])
+    ).rejects.toThrow(/requires exactly one --run/);
+    await expect(handleKlCommand(["trace", "--db", dbPath, "--run", "run-alpha", "--stage"])).rejects.toThrow(
+      /Option --stage for trace requires a value/
+    );
+    await expect(
+      handleKlCommand([
+        "trace",
+        "--db",
+        dbPath,
+        "--run",
+        "run-alpha",
+        "--stage",
+        "chunk",
+        "--stage",
+        "plan"
+      ])
+    ).rejects.toThrow(/requires exactly one --stage/);
+  });
+
+  test("trace rejects blank run and invalid stage before opening db", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-trace-invalid-")), "missing.db");
+
+    await expect(handleKlCommand(["trace", "--db", missingDbPath, "--run", ""])).rejects.toThrow(
+      /requires a non-empty --run/
+    );
+    await expect(
+      handleKlCommand(["trace", "--db", missingDbPath, "--run", "run-alpha", "--stage", "invalid-stage"])
+    ).rejects.toThrow(/Invalid --stage value "invalid-stage".*chunk, extract, merge, link, page-gen, plan, grade, diagnose/);
+
+    expect(existsSync(missingDbPath)).toBe(false);
+  });
+
+  test("trace rejects unknown options", async () => {
+    const dbPath = createTraceDb();
+
+    await expect(handleKlCommand(["trace", "--db", dbPath, "--run", "run-alpha", "--bogus", "1"])).rejects.toThrow(
+      /Unknown option for trace: --bogus/
     );
   });
 

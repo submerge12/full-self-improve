@@ -6,10 +6,12 @@ import Database from "better-sqlite3";
 
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
+import { listTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
 import {
   diagnosePersistentWeakSpots,
   type PersistentDiagnoseResult
 } from "../engine/persistent-diagnose.js";
+import { TRACE_STAGES, type TraceStage } from "../engine/trace.js";
 import {
   createDailyPlan,
   gradeQuizAttempt,
@@ -100,12 +102,28 @@ export interface KlPersistentDiagnoseCommandResult {
 
 export type KlDiagnoseCommandResult = KlPersistentDiagnoseCommandResult;
 
+export interface KlPersistentTraceResult {
+  runId: string;
+  stage?: TraceStage;
+  eventCount: number;
+  events: StoredTraceEvent[];
+}
+
+export interface KlPersistentTraceCommandResult {
+  command: "trace";
+  mode: "mock-persistent";
+  result: KlPersistentTraceResult;
+}
+
+export type KlTraceCommandResult = KlPersistentTraceCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
   | KlQuizCommandResult
   | KlTeachbackCommandResult
-  | KlDiagnoseCommandResult;
+  | KlDiagnoseCommandResult
+  | KlTraceCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -134,7 +152,11 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
     return runDiagnoseCommand(args);
   }
 
-  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose.`);
+  if (command === "trace") {
+    return runTraceCommand(args);
+  }
+
+  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace.`);
 }
 
 export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO = {}): Promise<KlCommandResult> {
@@ -294,6 +316,36 @@ function runDiagnoseCommand(args: readonly string[]): KlDiagnoseCommandResult {
   }
 }
 
+function runTraceCommand(args: readonly string[]): KlTraceCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--run", "--stage"]), "trace");
+  const dbPath = requireOne(options, "--db", "trace");
+  const runId = parseTraceRunId(requireOne(options, "--run", "trace"));
+  const stageValue = optionalOne(options, "--stage", "trace");
+  const stage = stageValue === undefined ? undefined : parseTraceStage(stageValue);
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+  try {
+    const query = {
+      runId,
+      ...(stage === undefined ? {} : { stage })
+    };
+    const events = listTraceEvents(db, query);
+
+    return {
+      command: "trace",
+      mode: "mock-persistent",
+      result: {
+        runId,
+        ...(stage === undefined ? {} : { stage }),
+        eventCount: events.length,
+        events
+      }
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -344,6 +396,22 @@ function parsePositiveSafeInteger(value: string, optionName: string): number {
   }
 
   return parsed;
+}
+
+function parseTraceRunId(value: string): string {
+  if (value.trim().length === 0) {
+    throw new UsageError("Command trace requires a non-empty --run value.");
+  }
+
+  return value;
+}
+
+function parseTraceStage(value: string): TraceStage {
+  if ((TRACE_STAGES as readonly string[]).includes(value)) {
+    return value as TraceStage;
+  }
+
+  throw new UsageError(`Invalid --stage value "${value}". Expected one of: ${TRACE_STAGES.join(", ")}.`);
 }
 
 function requireOne(options: Map<string, string[]>, name: string, command: string): string {

@@ -220,4 +220,30 @@ describe("mock engine commands", () => {
     });
     expect(trace.getEvents({ runId, stage: "grade" })).toHaveLength(1);
   });
+
+  it("rejects blank exact-match quiz answers", () => {
+    expect(() =>
+      gradeQuizAttempt({
+        item: {
+          id: "blank-answer",
+          conceptSlug: "quiz-validation",
+          answer: ""
+        },
+        response: ""
+      })
+    ).toThrow(/non-empty answer/);
+    expect(() =>
+      gradeQuizAttempt({
+        item: {
+          id: "blank-answer-spec",
+          conceptSlug: "quiz-validation",
+          answerSpec: {
+            type: "exact",
+            answers: ["   "]
+          }
+        },
+        response: ""
+      })
+    ).toThrow(/non-empty answer/);
+  });
 });

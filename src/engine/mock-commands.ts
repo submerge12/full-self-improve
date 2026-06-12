@@ -565,7 +565,10 @@ function toExactAnswerSpec(item: QuizItemInput): ExactAnswerSpec {
       throw new Error(`Exact-match grading requires at least one answer for item ${item.id}.`);
     }
 
-    return item.answerSpec;
+    return {
+      ...item.answerSpec,
+      answers: validateExactAnswers(item.id, item.answerSpec.answers, item.answerSpec.trim)
+    };
   }
 
   const answers = Array.isArray(item.answer) ? item.answer : item.answer === undefined ? [] : [item.answer];
@@ -575,8 +578,19 @@ function toExactAnswerSpec(item: QuizItemInput): ExactAnswerSpec {
 
   return {
     type: "exact",
-    answers
+    answers: validateExactAnswers(item.id, answers)
   };
+}
+
+function validateExactAnswers(itemId: string, answers: string[], trim = true): string[] {
+  for (const answer of answers) {
+    const comparable = trim === false ? answer : answer.trim();
+    if (comparable.length === 0) {
+      throw new Error(`Exact-match grading requires each answer to be a non-empty answer for item ${itemId}.`);
+    }
+  }
+
+  return [...answers];
 }
 
 function normalizeAnswer(answer: string, spec: ExactAnswerSpec): string {

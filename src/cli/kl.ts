@@ -20,6 +20,10 @@ import {
   type PersistentMockIngestSummary
 } from "../engine/persistent-ingest.js";
 import { createPersistentDailyPlan, type PersistentDailyPlan } from "../engine/persistent-plan.js";
+import {
+  gradePersistentExactQuizAttempt,
+  type PersistentQuizGradeResult
+} from "../engine/persistent-quiz.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -58,11 +62,19 @@ export interface KlPersistentPlanCommandResult {
 
 export type KlPlanCommandResult = KlMockPlanCommandResult | KlPersistentPlanCommandResult;
 
-export interface KlQuizCommandResult {
+export interface KlMockQuizCommandResult {
   command: "quiz";
   mode: "mock";
   result: QuizGradeResult;
 }
+
+export interface KlPersistentQuizCommandResult {
+  command: "quiz";
+  mode: "mock-persistent";
+  result: PersistentQuizGradeResult;
+}
+
+export type KlQuizCommandResult = KlMockQuizCommandResult | KlPersistentQuizCommandResult;
 
 export type KlCommandResult = KlIngestCommandResult | KlPlanCommandResult | KlQuizCommandResult;
 
@@ -160,11 +172,31 @@ function runPlanCommand(args: readonly string[]): KlPlanCommandResult {
 }
 
 function runQuizCommand(args: readonly string[]): KlQuizCommandResult {
-  const options = parseOptions(args, new Set(["--item", "--concept", "--answer", "--response"]), "quiz");
+  const options = parseOptions(args, new Set(["--item", "--concept", "--answer", "--response", "--db"]), "quiz");
+  const dbPath = optionalOne(options, "--db", "quiz");
   const itemId = requireOne(options, "--item", "quiz");
   const conceptSlug = requireOne(options, "--concept", "quiz");
   const response = requireOne(options, "--response", "quiz");
   const answers = requireMany(options, "--answer", "quiz");
+
+  if (dbPath !== undefined) {
+    const db = new Database(dbPath);
+    try {
+      applyMigrations(db);
+      return {
+        command: "quiz",
+        mode: "mock-persistent",
+        result: gradePersistentExactQuizAttempt(db, {
+          conceptSlug,
+          statement: itemId,
+          answers,
+          response
+        })
+      };
+    } finally {
+      db.close();
+    }
+  }
 
   return {
     command: "quiz",

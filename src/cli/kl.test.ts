@@ -7,7 +7,7 @@ import { describe, expect, test } from "vitest";
 
 import { createConcept, type ConceptStatus } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
-import { handleKlCommand, type KlCommandResult } from "./kl.js";
+import { handleKlCommand, type KlCommandResult, type KlPersistentQuizCommandResult } from "./kl.js";
 
 function createCapture(): { sink: { write(chunk: string | Uint8Array): boolean }; text(): string } {
   let output = "";
@@ -29,7 +29,9 @@ function parseCapturedJson(capture: { text(): string }): KlCommandResult {
   return JSON.parse(capture.text()) as KlCommandResult;
 }
 
-function countRows(dbPath: string, table: "sources" | "chunks" | "concepts" | "pages" | "study_plans"): number {
+type CountableTable = "sources" | "chunks" | "concepts" | "pages" | "study_plans" | "items" | "attempts" | "mastery";
+
+function countRows(dbPath: string, table: CountableTable): number {
   const db = new Database(dbPath, { readonly: true });
   try {
     const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
@@ -53,6 +55,44 @@ function createPlanDb(concepts: Array<{ slug: string; name: string; status?: Con
   }
 
   return dbPath;
+}
+
+function readQuizRows(dbPath: string): {
+  items: Array<{ id: number; conceptSlug: string; statement: string; answerSpec: unknown }>;
+  attempts: Array<{ id: number; itemId: number; response: string; verdict: string; gradingMethod: string }>;
+} {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const items = db
+      .prepare(
+        `SELECT
+           items.id,
+           concepts.slug AS conceptSlug,
+           items.statement,
+           items.answer_spec AS answerSpec
+         FROM items
+         INNER JOIN concepts ON concepts.id = items.concept_id
+         ORDER BY items.id`
+      )
+      .all() as Array<{ id: number; conceptSlug: string; statement: string; answerSpec: string }>;
+    const attempts = db
+      .prepare(
+        `SELECT id, item_id AS itemId, response, verdict, grading_method AS gradingMethod
+         FROM attempts
+         ORDER BY id`
+      )
+      .all() as Array<{ id: number; itemId: number; response: string; verdict: string; gradingMethod: string }>;
+
+    return {
+      items: items.map((item) => ({
+        ...item,
+        answerSpec: JSON.parse(item.answerSpec) as unknown
+      })),
+      attempts
+    };
+  } finally {
+    db.close();
+  }
 }
 
 describe("kl CLI handler", () => {
@@ -302,6 +342,7 @@ describe("kl CLI handler", () => {
 
     expect(parseCapturedJson(stdout)).toEqual(result);
     expect(result.command).toBe("quiz");
+    expect(result.mode).toBe("mock");
     if (result.command !== "quiz") {
       throw new Error("Expected quiz result.");
     }
@@ -309,5 +350,197 @@ describe("kl CLI handler", () => {
     expect(result.result.conceptSlug).toBe("paris");
     expect(result.result.verdict).toBe("correct");
     expect(result.result.masteryDelta).toBe(0.1);
+  });
+
+  test("quiz rejects blank exact answers in mock mode", async () => {
+    await expect(
+      handleKlCommand([
+        "quiz",
+        "--item",
+        "blank-answer",
+        "--concept",
+        "validation",
+        "--answer",
+        "",
+        "--response",
+        ""
+      ])
+    ).rejects.toThrow(/non-empty answer/);
+  });
+
+  test("quiz with a db persists a correct answer attempt and returns persistent mode", async () => {
+    const dbPath = createPlanDb([{ slug: "mitochondria", name: "Mitochondria", status: "generated" }]);
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "quiz",
+        "--db",
+        dbPath,
+        "--item",
+        "Which organelle is the powerhouse of the cell?",
+        "--concept",
+        "mitochondria",
+        "--answer",
+        "mitochondria",
+        "--response",
+        " mitochondria "
+      ],
+      { stdout: stdout.sink }
+    )) as KlPersistentQuizCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result.command).toBe("quiz");
+    expect(result.mode).toBe("mock-persistent");
+    expect(result.result).toMatchObject({
+      conceptSlug: "mitochondria",
+      verdict: "correct",
+      masteryDelta: 0.1,
+      mastery: {
+        score: 0.1,
+        attemptsN: 1
+      }
+    });
+    expect(result.result.itemId).toBeGreaterThan(0);
+    expect(result.result.attemptId).toBeGreaterThan(0);
+    expect(readQuizRows(dbPath)).toMatchObject({
+      items: [
+        {
+          id: result.result.itemId,
+          conceptSlug: "mitochondria",
+          statement: "Which organelle is the powerhouse of the cell?",
+          answerSpec: { type: "exact", answers: ["mitochondria"] }
+        }
+      ],
+      attempts: [
+        {
+          id: result.result.attemptId,
+          itemId: result.result.itemId,
+          response: " mitochondria ",
+          verdict: "correct",
+          gradingMethod: "exact"
+        }
+      ]
+    });
+    expect(countRows(dbPath, "mastery")).toBe(1);
+  });
+
+  test("second quiz with a db on the same concept increments mastery attempts and changes score", async () => {
+    const dbPath = createPlanDb([{ slug: "photosynthesis", name: "Photosynthesis", status: "generated" }]);
+
+    const first = (await handleKlCommand([
+      "quiz",
+      "--db",
+      dbPath,
+      "--item",
+      "What gas do plants release during photosynthesis?",
+      "--concept",
+      "photosynthesis",
+      "--answer",
+      "oxygen",
+      "--answer",
+      "O2",
+      "--response",
+      "oxygen"
+    ])) as KlPersistentQuizCommandResult;
+    const second = (await handleKlCommand([
+      "quiz",
+      "--db",
+      dbPath,
+      "--item",
+      "What gas do plants release during photosynthesis?",
+      "--concept",
+      "photosynthesis",
+      "--answer",
+      "oxygen",
+      "--answer",
+      "O2",
+      "--response",
+      "carbon dioxide"
+    ])) as KlPersistentQuizCommandResult;
+
+    expect(first.mode).toBe("mock-persistent");
+    expect(second.mode).toBe("mock-persistent");
+    expect(first.result.mastery).toMatchObject({ score: 0.1, attemptsN: 1 });
+    expect(second.result).toMatchObject({
+      verdict: "incorrect",
+      masteryDelta: -0.05,
+      mastery: {
+        score: 0.05,
+        attemptsN: 2
+      }
+    });
+    expect(countRows(dbPath, "items")).toBe(2);
+    expect(countRows(dbPath, "attempts")).toBe(2);
+    expect(countRows(dbPath, "mastery")).toBe(1);
+  });
+
+  test("quiz with a db rejects a missing concept without partial quiz writes", async () => {
+    const dbPath = createPlanDb([]);
+
+    await expect(
+      handleKlCommand([
+        "quiz",
+        "--db",
+        dbPath,
+        "--item",
+        "Missing concept prompt",
+        "--concept",
+        "missing",
+        "--answer",
+        "yes",
+        "--response",
+        "yes"
+      ])
+    ).rejects.toThrow(/Concept missing was not found/);
+
+    expect(countRows(dbPath, "items")).toBe(0);
+    expect(countRows(dbPath, "attempts")).toBe(0);
+    expect(countRows(dbPath, "mastery")).toBe(0);
+  });
+
+  test("quiz requires exactly one db path when db is provided", async () => {
+    const dbPath = createPlanDb([{ slug: "algebra", name: "Algebra", status: "generated" }]);
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(
+      handleKlCommand([
+        "quiz",
+        "--db",
+        dbPath,
+        "--db",
+        otherDbPath,
+        "--item",
+        "Algebra prompt",
+        "--concept",
+        "algebra",
+        "--answer",
+        "x",
+        "--response",
+        "x"
+      ])
+    ).rejects.toThrow(/requires exactly one --db/);
+  });
+
+  test("quiz requires a db value when db is provided", async () => {
+    await expect(handleKlCommand(["quiz", "--db"])).rejects.toThrow(/Option --db for quiz requires a value/);
+  });
+
+  test("quiz rejects unknown options", async () => {
+    await expect(
+      handleKlCommand([
+        "quiz",
+        "--item",
+        "capital-france",
+        "--concept",
+        "paris",
+        "--answer",
+        "Paris",
+        "--response",
+        "Paris",
+        "--bogus",
+        "1"
+      ])
+    ).rejects.toThrow(/Unknown option for quiz: --bogus/);
   });
 });

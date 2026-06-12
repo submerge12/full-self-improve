@@ -7,6 +7,10 @@ import Database from "better-sqlite3";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import {
+  diagnosePersistentWeakSpots,
+  type PersistentDiagnoseResult
+} from "../engine/persistent-diagnose.js";
+import {
   createDailyPlan,
   gradeQuizAttempt,
   runMockIngest,
@@ -88,11 +92,20 @@ export interface KlPersistentTeachbackCommandResult {
 
 export type KlTeachbackCommandResult = KlPersistentTeachbackCommandResult;
 
+export interface KlPersistentDiagnoseCommandResult {
+  command: "diagnose";
+  mode: "mock-persistent";
+  result: PersistentDiagnoseResult;
+}
+
+export type KlDiagnoseCommandResult = KlPersistentDiagnoseCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
   | KlQuizCommandResult
-  | KlTeachbackCommandResult;
+  | KlTeachbackCommandResult
+  | KlDiagnoseCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -117,7 +130,11 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
     return runTeachbackCommand(args);
   }
 
-  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback.`);
+  if (command === "diagnose") {
+    return runDiagnoseCommand(args);
+  }
+
+  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose.`);
 }
 
 export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO = {}): Promise<KlCommandResult> {
@@ -254,6 +271,29 @@ function runTeachbackCommand(args: readonly string[]): KlTeachbackCommandResult 
   }
 }
 
+function runDiagnoseCommand(args: readonly string[]): KlDiagnoseCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--threshold", "--limit"]), "diagnose");
+  const dbPath = requireOne(options, "--db", "diagnose");
+  const thresholdValue = optionalOne(options, "--threshold", "diagnose");
+  const limitValue = optionalOne(options, "--limit", "diagnose");
+  const masteryThreshold = thresholdValue === undefined ? undefined : parseUnitNumber(thresholdValue, "--threshold");
+  const limit = limitValue === undefined ? undefined : parsePositiveSafeInteger(limitValue, "--limit");
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+  try {
+    return {
+      command: "diagnose",
+      mode: "mock-persistent",
+      result: diagnosePersistentWeakSpots(db, {
+        ...(masteryThreshold === undefined ? {} : { masteryThreshold }),
+        ...(limit === undefined ? {} : { limit })
+      })
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -280,6 +320,30 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
   }
 
   return options;
+}
+
+function parseUnitNumber(value: string, optionName: string): number {
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+
+  if (trimmed.length === 0 || !Number.isFinite(parsed) || parsed < 0 || parsed > 1) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a finite number between 0 and 1.`);
+  }
+
+  return parsed;
+}
+
+function parsePositiveSafeInteger(value: string, optionName: string): number {
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a positive safe integer.`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a positive safe integer.`);
+  }
+
+  return parsed;
 }
 
 function requireOne(options: Map<string, string[]>, name: string, command: string): string {

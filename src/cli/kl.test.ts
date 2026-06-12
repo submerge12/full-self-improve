@@ -1,11 +1,11 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import Database from "better-sqlite3";
 import { describe, expect, test } from "vitest";
 
-import { createPage, createSourceWithChunk } from "../db/content-store.js";
+import { createPage, createSourceWithChunk, recordMasteryUpdate } from "../db/content-store.js";
 import { createConcept, type ConceptStatus } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
 import {
@@ -36,15 +36,18 @@ function parseCapturedJson(capture: { text(): string }): KlCommandResult {
 }
 
 type CountableTable =
+  | "schema_migrations"
   | "sources"
   | "chunks"
   | "concepts"
+  | "concept_edges"
   | "pages"
   | "study_plans"
   | "items"
   | "attempts"
   | "teachbacks"
-  | "mastery";
+  | "mastery"
+  | "reviews";
 
 function countRows(dbPath: string, table: CountableTable): number {
   const db = new Database(dbPath, { readonly: true });
@@ -64,6 +67,42 @@ function createPlanDb(concepts: Array<{ slug: string; name: string; status?: Con
     applyMigrations(db);
     for (const concept of concepts) {
       createConcept(db, concept);
+    }
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
+function createDiagnoseDb(
+  concepts: Array<{
+    slug: string;
+    name: string;
+    score: number;
+    confidence?: number;
+    attemptsN?: number;
+    status?: ConceptStatus;
+  }>
+): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-diagnose-db-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    for (const conceptInput of concepts) {
+      const concept = createConcept(db, {
+        slug: conceptInput.slug,
+        name: conceptInput.name,
+        status: conceptInput.status ?? "generated"
+      });
+      recordMasteryUpdate(db, {
+        conceptId: concept.id,
+        score: conceptInput.score,
+        confidence: conceptInput.confidence ?? 0.5,
+        attemptsN: conceptInput.attemptsN ?? 1,
+        lastSeenAt: `2026-06-12T0${concept.id}:00:00.000Z`
+      });
     }
   } finally {
     db.close();
@@ -178,7 +217,47 @@ function readTeachbackRows(dbPath: string): Array<{
   }
 }
 
+function countMutableRows(dbPath: string): Record<CountableTable, number> {
+  return {
+    schema_migrations: countRows(dbPath, "schema_migrations"),
+    sources: countRows(dbPath, "sources"),
+    chunks: countRows(dbPath, "chunks"),
+    concepts: countRows(dbPath, "concepts"),
+    concept_edges: countRows(dbPath, "concept_edges"),
+    pages: countRows(dbPath, "pages"),
+    study_plans: countRows(dbPath, "study_plans"),
+    items: countRows(dbPath, "items"),
+    attempts: countRows(dbPath, "attempts"),
+    teachbacks: countRows(dbPath, "teachbacks"),
+    mastery: countRows(dbPath, "mastery"),
+    reviews: countRows(dbPath, "reviews")
+  };
+}
+
+function listTableNames(dbPath: string): string[] {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table'
+         ORDER BY name`
+      )
+      .all() as Array<{ name: string }>;
+    return rows.map((row) => row.name);
+  } finally {
+    db.close();
+  }
+}
+
 describe("kl CLI handler", () => {
+  test("unknown command lists diagnose as an expected command", async () => {
+    await expect(handleKlCommand(["unknown"])).rejects.toThrow(
+      /Expected one of: ingest, plan, quiz, teachback, diagnose/
+    );
+  });
+
   test("ingest reads a markdown vault in mock mode and writes JSON", async () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), "kl-cli-vault-"));
     writeFileSync(
@@ -798,5 +877,149 @@ describe("kl CLI handler", () => {
         "1"
       ])
     ).rejects.toThrow(/Unknown option for teachback: --bogus/);
+  });
+
+  test("diagnose with a db returns weak spots and writes JSON", async () => {
+    const dbPath = createDiagnoseDb([
+      { slug: "alpha", name: "Alpha", score: 0.2, confidence: 0.4 },
+      { slug: "mastered", name: "Mastered", score: 0.95, confidence: 0.9 }
+    ]);
+    const stdout = createCapture();
+
+    const result = await handleKlCommand(["diagnose", "--db", dbPath], { stdout: stdout.sink });
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result.command).toBe("diagnose");
+    expect(result.mode).toBe("mock-persistent");
+    if (result.command !== "diagnose" || result.mode !== "mock-persistent") {
+      throw new Error("Expected persistent diagnose result.");
+    }
+    expect(result.result.masteryThreshold).toBe(0.8);
+    expect(result.result.weakSpots).toMatchObject([
+      {
+        conceptSlug: "alpha",
+        conceptName: "Alpha",
+        score: 0.2,
+        confidence: 0.4,
+        attemptsN: 1
+      }
+    ]);
+    expect(result.result.summary).toMatchObject({
+      weakSpotCount: 1,
+      threshold: 0.8,
+      lowestScore: 0.2
+    });
+    expect(result.result.traceEvents).toHaveLength(1);
+  });
+
+  test("diagnose with threshold and limit applies options deterministically", async () => {
+    const dbPath = createDiagnoseDb([
+      { slug: "alpha", name: "Alpha", score: 0.2 },
+      { slug: "beta", name: "Beta", score: 0.1 },
+      { slug: "gamma", name: "Gamma", score: 0.6 }
+    ]);
+
+    const result = await handleKlCommand(["diagnose", "--db", dbPath, "--threshold", "0.5", "--limit", "1"]);
+
+    expect(result.command).toBe("diagnose");
+    expect(result.mode).toBe("mock-persistent");
+    if (result.command !== "diagnose" || result.mode !== "mock-persistent") {
+      throw new Error("Expected persistent diagnose result.");
+    }
+    expect(result.result.masteryThreshold).toBe(0.5);
+    expect(result.result.weakSpots.map((weakSpot) => weakSpot.conceptSlug)).toEqual(["beta"]);
+    expect(result.result.summary).toMatchObject({
+      weakSpotCount: 1,
+      threshold: 0.5,
+      lowestScore: 0.1
+    });
+  });
+
+  test("diagnose is read-only from the CLI", async () => {
+    const dbPath = createDiagnoseDb([
+      { slug: "alpha", name: "Alpha", score: 0.2 },
+      { slug: "beta", name: "Beta", score: 0.9 }
+    ]);
+    const beforeRows = countMutableRows(dbPath);
+
+    await handleKlCommand(["diagnose", "--db", dbPath, "--threshold", "0.8"]);
+
+    expect(countMutableRows(dbPath)).toEqual(beforeRows);
+  });
+
+  test("diagnose rejects a missing db without creating it", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-diagnose-missing-")), "missing.db");
+
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", "0.8"])).rejects.toThrow();
+
+    expect(existsSync(missingDbPath)).toBe(false);
+  });
+
+  test("diagnose rejects an unmigrated db without writing schema", async () => {
+    const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-diagnose-unmigrated-"));
+    const dbPath = path.join(dbDir, "empty.db");
+    const db = new Database(dbPath);
+    db.close();
+
+    await expect(handleKlCommand(["diagnose", "--db", dbPath, "--threshold", "0.8"])).rejects.toThrow();
+
+    expect(listTableNames(dbPath)).toEqual([]);
+  });
+
+  test("diagnose rejects missing and duplicate db threshold and limit options", async () => {
+    const dbPath = createDiagnoseDb([{ slug: "alpha", name: "Alpha", score: 0.2 }]);
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["diagnose"])).rejects.toThrow(/requires exactly one --db/);
+    await expect(handleKlCommand(["diagnose", "--db", dbPath, "--db", otherDbPath])).rejects.toThrow(
+      /requires exactly one --db/
+    );
+    await expect(
+      handleKlCommand(["diagnose", "--db", dbPath, "--threshold", "0.7", "--threshold", "0.8"])
+    ).rejects.toThrow(/requires exactly one --threshold/);
+    await expect(
+      handleKlCommand(["diagnose", "--db", dbPath, "--limit", "1", "--limit", "2"])
+    ).rejects.toThrow(/requires exactly one --limit/);
+  });
+
+  test("diagnose rejects invalid threshold and limit values before opening db", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-diagnose-invalid-")), "missing.db");
+
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", "abc"])).rejects.toThrow(
+      /Invalid --threshold value "abc"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", "Infinity"])).rejects.toThrow(
+      /Invalid --threshold value "Infinity"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", ""])).rejects.toThrow(
+      /Invalid --threshold value ""/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", "   "])).rejects.toThrow(
+      /Invalid --threshold value " {3}"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", "-0.1"])).rejects.toThrow(
+      /Invalid --threshold value "-0.1"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--threshold", "2"])).rejects.toThrow(
+      /Invalid --threshold value "2"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--limit", "0"])).rejects.toThrow(
+      /Invalid --limit value "0"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--limit", "1.5"])).rejects.toThrow(
+      /Invalid --limit value "1.5"/
+    );
+    await expect(handleKlCommand(["diagnose", "--db", missingDbPath, "--limit", "9007199254740992"])).rejects.toThrow(
+      /Invalid --limit value "9007199254740992"/
+    );
+    expect(existsSync(missingDbPath)).toBe(false);
+  });
+
+  test("diagnose rejects unknown options", async () => {
+    const dbPath = createDiagnoseDb([{ slug: "alpha", name: "Alpha", score: 0.2 }]);
+
+    await expect(handleKlCommand(["diagnose", "--db", dbPath, "--bogus", "1"])).rejects.toThrow(
+      /Unknown option for diagnose: --bogus/
+    );
   });
 });

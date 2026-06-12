@@ -2,7 +2,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import Database from "better-sqlite3";
+
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
+import { applyMigrations } from "../db/migrations.js";
 import {
   createDailyPlan,
   gradeQuizAttempt,
@@ -12,6 +15,10 @@ import {
   type PlanConceptInput,
   type QuizGradeResult
 } from "../engine/mock-commands.js";
+import {
+  runPersistentMockIngest,
+  type PersistentMockIngestSummary
+} from "../engine/persistent-ingest.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -22,11 +29,19 @@ export interface KlHandlerIO {
   stderr?: WritableSink;
 }
 
-export interface KlIngestCommandResult {
+export interface KlMockIngestCommandResult {
   command: "ingest";
   mode: "mock";
   result: MockIngestResult;
 }
+
+export interface KlPersistentIngestCommandResult {
+  command: "ingest";
+  mode: "mock-persistent";
+  result: PersistentMockIngestSummary;
+}
+
+export type KlIngestCommandResult = KlMockIngestCommandResult | KlPersistentIngestCommandResult;
 
 export interface KlPlanCommandResult {
   command: "plan";
@@ -71,12 +86,27 @@ export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO =
 }
 
 async function runIngestCommand(args: readonly string[]): Promise<KlIngestCommandResult> {
-  const options = parseOptions(args, new Set(["--vault"]), "ingest");
+  const options = parseOptions(args, new Set(["--vault", "--db"]), "ingest");
   const vault = requireOne(options, "--vault", "ingest");
+  const dbPath = optionalOne(options, "--db", "ingest");
   const adapter = new MarkdownVaultAdapter({
     id: "cli-vault",
     rootDir: vault
   });
+
+  if (dbPath !== undefined) {
+    const db = new Database(dbPath);
+    try {
+      applyMigrations(db);
+      return {
+        command: "ingest",
+        mode: "mock-persistent",
+        result: await runPersistentMockIngest(db, adapter)
+      };
+    } finally {
+      db.close();
+    }
+  }
 
   return {
     command: "ingest",
@@ -151,6 +181,20 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
 
 function requireOne(options: Map<string, string[]>, name: string, command: string): string {
   const values = options.get(name) ?? [];
+
+  if (values.length !== 1) {
+    throw new UsageError(`Command ${command} requires exactly one ${name} value.`);
+  }
+
+  return values[0] as string;
+}
+
+function optionalOne(options: Map<string, string[]>, name: string, command: string): string | undefined {
+  const values = options.get(name) ?? [];
+
+  if (values.length === 0) {
+    return undefined;
+  }
 
   if (values.length !== 1) {
     throw new UsageError(`Command ${command} requires exactly one ${name} value.`);

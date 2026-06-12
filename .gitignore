@@ -1,0 +1,10 @@
+node_modules/
+.next/
+dist/
+coverage/
+*.log
+*.db
+*.db-journal
+.env
+.env.*
+!.env.example

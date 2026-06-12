@@ -15,7 +15,8 @@ const EXPECTED_TABLES = [
   "schema_migrations",
   "sources",
   "study_plans",
-  "teachbacks"
+  "teachbacks",
+  "trace_events"
 ].sort();
 
 describe("database migrations", () => {
@@ -45,6 +46,53 @@ describe("database migrations", () => {
 
       expect(secondRun).toEqual([]);
       expect(records.map((record) => record.id)).toEqual(MIGRATIONS.map((migration) => migration.id));
+    } finally {
+      db.close();
+    }
+  });
+
+  test("enforces trace event stage, level, and JSON data constraints", () => {
+    const db = new Database(":memory:");
+
+    try {
+      applyMigrations(db);
+
+      db.prepare(
+        `INSERT INTO trace_events (run_id, stage, level, message, timestamp, data)
+         VALUES ('run-trace', 'chunk', 'info', 'Chunked source', '2026-06-12T00:00:00.000Z', '{"chunks":1}')`
+      ).run();
+
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO trace_events (run_id, stage, level, message, timestamp, data)
+             VALUES ('run-trace', 'invalid-stage', 'info', 'Bad stage', '2026-06-12T00:01:00.000Z', 'null')`
+          )
+          .run()
+      ).toThrow();
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO trace_events (run_id, stage, level, message, timestamp, data)
+             VALUES ('run-trace', 'chunk', 'debug', 'Bad level', '2026-06-12T00:02:00.000Z', 'null')`
+          )
+          .run()
+      ).toThrow();
+      expect(() =>
+        db
+          .prepare(
+            `INSERT INTO trace_events (run_id, stage, level, message, timestamp, data)
+             VALUES ('run-trace', 'chunk', 'info', 'Bad data', '2026-06-12T00:03:00.000Z', 'not-json')`
+          )
+          .run()
+      ).toThrow();
+
+      const indexNames = db
+        .prepare("PRAGMA index_list('trace_events')")
+        .all()
+        .map((row) => (row as { name: string }).name);
+
+      expect(indexNames).toEqual(expect.arrayContaining(["trace_events_run_id_id_idx", "trace_events_run_id_stage_id_idx"]));
     } finally {
       db.close();
     }

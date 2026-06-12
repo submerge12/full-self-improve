@@ -138,6 +138,24 @@ CREATE TABLE IF NOT EXISTS reviews (
 
 CREATE INDEX IF NOT EXISTS reviews_due_at_idx ON reviews (due_at);
 `
+  },
+  {
+    id: "0002_trace_events",
+    name: "Trace events table",
+    sql: `
+CREATE TABLE IF NOT EXISTS trace_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  stage TEXT NOT NULL CHECK (stage IN ('chunk', 'extract', 'merge', 'link', 'page-gen', 'plan', 'grade', 'diagnose')),
+  level TEXT NOT NULL CHECK (level IN ('info', 'warn', 'error')),
+  message TEXT NOT NULL,
+  timestamp TEXT NOT NULL,
+  data TEXT NOT NULL DEFAULT 'null' CHECK (json_valid(data))
+);
+
+CREATE INDEX IF NOT EXISTS trace_events_run_id_id_idx ON trace_events (run_id, id);
+CREATE INDEX IF NOT EXISTS trace_events_run_id_stage_id_idx ON trace_events (run_id, stage, id);
+`
   }
 ] as const satisfies readonly Migration[];
 

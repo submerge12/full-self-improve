@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, real, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
+import { TRACE_STAGES } from "../engine/trace.js";
+
 export const sourceStatuses = ["pending", "ingested", "error"] as const;
 export const conceptStatuses = ["stub", "generated", "reviewed"] as const;
 export const conceptEdgeKinds = ["prerequisite", "related", "part_of"] as const;
@@ -9,6 +11,8 @@ export const itemTypes = ["mcq", "fill_in", "free_form"] as const;
 export const attemptVerdicts = ["correct", "incorrect", "partial"] as const;
 export const gradingMethods = ["exact", "rubric"] as const;
 export const studyPlanStatuses = ["planned", "active", "completed", "skipped"] as const;
+export const traceStages = TRACE_STAGES;
+export const traceLevels = ["info", "warn", "error"] as const;
 
 export const sources = sqliteTable(
   "sources",
@@ -215,5 +219,25 @@ export const reviews = sqliteTable(
     uniqueIndex("reviews_concept_id_unique").on(table.conceptId),
     index("reviews_due_at_idx").on(table.dueAt),
     check("reviews_fsrs_state_json_check", sql`json_valid(${table.fsrsState})`)
+  ]
+);
+
+export const traceEvents = sqliteTable(
+  "trace_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    runId: text("run_id").notNull(),
+    stage: text("stage", { enum: traceStages }).notNull(),
+    level: text("level", { enum: traceLevels }).notNull(),
+    message: text("message").notNull(),
+    timestamp: text("timestamp").notNull(),
+    data: text("data").notNull().default("null")
+  },
+  (table) => [
+    index("trace_events_run_id_id_idx").on(table.runId, table.id),
+    index("trace_events_run_id_stage_id_idx").on(table.runId, table.stage, table.id),
+    check("trace_events_stage_check", sql`${table.stage} IN ('chunk', 'extract', 'merge', 'link', 'page-gen', 'plan', 'grade', 'diagnose')`),
+    check("trace_events_level_check", sql`${table.level} IN ('info', 'warn', 'error')`),
+    check("trace_events_data_json_check", sql`json_valid(${table.data})`)
   ]
 );

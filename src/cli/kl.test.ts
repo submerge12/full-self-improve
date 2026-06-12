@@ -9,6 +9,7 @@ import { createPage, createSourceWithChunk, recordMasteryUpdate } from "../db/co
 import { createConcept, type ConceptStatus } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
 import { persistTraceEvent } from "../db/trace-store.js";
+import type { TraceEvent } from "../engine/trace.js";
 import {
   handleKlCommand,
   type KlCommandResult,
@@ -70,6 +71,23 @@ interface TraceCliCommandResult {
   };
 }
 
+type TraceCliEvent = TraceCliCommandResult["result"]["events"][number];
+
+const DOMAIN_COUNTABLE_TABLES = [
+  "schema_migrations",
+  "sources",
+  "chunks",
+  "concepts",
+  "concept_edges",
+  "pages",
+  "study_plans",
+  "items",
+  "attempts",
+  "teachbacks",
+  "mastery",
+  "reviews"
+] as const satisfies readonly CountableTable[];
+
 function countRows(dbPath: string, table: CountableTable): number {
   const db = new Database(dbPath, { readonly: true });
   try {
@@ -78,6 +96,46 @@ function countRows(dbPath: string, table: CountableTable): number {
   } finally {
     db.close();
   }
+}
+
+async function readTraceRun(dbPath: string, runId: string): Promise<TraceCliCommandResult> {
+  return (await handleKlCommand(["trace", "--db", dbPath, "--run", runId])) as unknown as TraceCliCommandResult;
+}
+
+async function expectPersistedTraceEventsMatchResult(
+  dbPath: string,
+  runId: string,
+  traceEvents: readonly TraceEvent[]
+): Promise<TraceCliCommandResult> {
+  const trace = await readTraceRun(dbPath, runId);
+
+  expect(trace.result.runId).toBe(runId);
+  expect(trace.result.eventCount).toBe(traceEvents.length);
+  expect(stripTraceEventIds(trace.result.events)).toEqual(traceEvents.map(normalizeTraceEventForStorage));
+
+  return trace;
+}
+
+function stripTraceEventIds(events: readonly TraceCliEvent[]): Array<Omit<TraceCliEvent, "id">> {
+  return events.map(({ runId, stage, level, message, timestamp, data }) => ({
+    runId,
+    stage,
+    level,
+    message,
+    timestamp,
+    data
+  }));
+}
+
+function normalizeTraceEventForStorage(event: TraceEvent): Omit<TraceCliEvent, "id"> {
+  return {
+    runId: event.runId,
+    stage: event.stage,
+    level: event.level,
+    message: event.message,
+    timestamp: event.timestamp,
+    data: event.data ?? null
+  };
 }
 
 function createPlanDb(concepts: Array<{ slug: string; name: string; status?: ConceptStatus }>): string {
@@ -291,6 +349,16 @@ function countMutableRows(dbPath: string): Record<CountableTable, number> {
     reviews: countRows(dbPath, "reviews"),
     trace_events: countRows(dbPath, "trace_events")
   };
+}
+
+function countDomainRows(dbPath: string): Record<(typeof DOMAIN_COUNTABLE_TABLES)[number], number> {
+  const counts = {} as Record<(typeof DOMAIN_COUNTABLE_TABLES)[number], number>;
+
+  for (const table of DOMAIN_COUNTABLE_TABLES) {
+    counts[table] = countRows(dbPath, table);
+  }
+
+  return counts;
 }
 
 function listTableNames(dbPath: string): string[] {
@@ -576,6 +644,40 @@ describe("kl CLI handler", () => {
     expect(countRows(dbPath, "pages")).toBe(2);
   });
 
+  test("ingest with a db persists returned trace events for trace queries", async () => {
+    const vaultDir = mkdtempSync(path.join(tmpdir(), "kl-cli-vault-"));
+    const dbPath = path.join(vaultDir, "knowledge-loop.db");
+    writeFileSync(
+      path.join(vaultDir, "Learning.md"),
+      [
+        "---",
+        "title: Persistent Trace Learning",
+        "---",
+        "# Alpha Concept",
+        "Alpha concept body links to [[Beta Concept]].",
+        "# Beta Concept",
+        "Beta concept body."
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = await handleKlCommand(["ingest", "--vault", vaultDir, "--db", dbPath]);
+
+    expect(result.command).toBe("ingest");
+    expect(result.mode).toBe("mock-persistent");
+    if (result.command !== "ingest" || result.mode !== "mock-persistent") {
+      throw new Error("Expected persistent ingest result.");
+    }
+
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+    expect(trace.result.events.map((event) => event.stage)).toEqual(
+      expect.arrayContaining(["chunk", "extract", "merge", "link", "page-gen"])
+    );
+    expect(trace.result.events.map((event) => event.message)).toEqual(
+      result.result.traceEvents.map((event) => event.message)
+    );
+  });
+
   test("ingest requires exactly one db path when db is provided", async () => {
     const vaultDir = mkdtempSync(path.join(tmpdir(), "kl-cli-vault-"));
     const firstDbPath = path.join(vaultDir, "first.db");
@@ -659,6 +761,26 @@ describe("kl CLI handler", () => {
     expect(countRows(dbPath, "study_plans")).toBe(1);
   });
 
+  test("plan with a db persists returned trace events for trace queries", async () => {
+    const dbPath = createPlanDb([{ slug: "algebra", name: "Algebra", status: "generated" }]);
+
+    const result = await handleKlCommand(["plan", "--date", "2026-06-12", "--db", dbPath]);
+
+    expect(result.command).toBe("plan");
+    expect(result.mode).toBe("mock-persistent");
+    if (result.command !== "plan" || result.mode !== "mock-persistent") {
+      throw new Error("Expected persistent plan result.");
+    }
+
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+    expect(trace.result.events).toHaveLength(1);
+    expect(trace.result.events[0]).toMatchObject({
+      runId: result.result.runId,
+      stage: "plan",
+      message: "Persistent daily plan created"
+    });
+  });
+
   test("plan with a db reuses the existing study plan for the same date", async () => {
     const dbPath = createPlanDb([{ slug: "algebra", name: "Algebra", status: "generated" }]);
 
@@ -677,6 +799,34 @@ describe("kl CLI handler", () => {
     }
     expect(second.result.queue).toEqual(first.result.queue);
     expect(countRows(dbPath, "study_plans")).toBe(1);
+  });
+
+  test("repeated plan with a db uses distinct trace runs without aggregating events", async () => {
+    const dbPath = createPlanDb([{ slug: "algebra", name: "Algebra", status: "generated" }]);
+
+    const first = await handleKlCommand(["plan", "--date", "2026-06-14", "--db", dbPath]);
+    const second = await handleKlCommand(["plan", "--date", "2026-06-14", "--db", dbPath]);
+
+    expect(first.command).toBe("plan");
+    expect(second.command).toBe("plan");
+    if (
+      first.command !== "plan" ||
+      first.mode !== "mock-persistent" ||
+      second.command !== "plan" ||
+      second.mode !== "mock-persistent"
+    ) {
+      throw new Error("Expected persistent plan results.");
+    }
+
+    expect(second.result.runId).not.toBe(first.result.runId);
+
+    const firstTrace = await expectPersistedTraceEventsMatchResult(dbPath, first.result.runId, first.result.traceEvents);
+    const secondTrace = await expectPersistedTraceEventsMatchResult(dbPath, second.result.runId, second.result.traceEvents);
+
+    expect(firstTrace.result.events).toHaveLength(first.result.traceEvents.length);
+    expect(secondTrace.result.events).toHaveLength(second.result.traceEvents.length);
+    expect(firstTrace.result.events.every((event) => event.runId === first.result.runId)).toBe(true);
+    expect(secondTrace.result.events.every((event) => event.runId === second.result.runId)).toBe(true);
   });
 
   test("plan rejects db and manual concepts together", async () => {
@@ -817,6 +967,33 @@ describe("kl CLI handler", () => {
       ]
     });
     expect(countRows(dbPath, "mastery")).toBe(1);
+  });
+
+  test("quiz with a db persists returned grade trace events for trace queries", async () => {
+    const dbPath = createPlanDb([{ slug: "mitochondria", name: "Mitochondria", status: "generated" }]);
+
+    const result = (await handleKlCommand([
+      "quiz",
+      "--db",
+      dbPath,
+      "--item",
+      "Which organelle is the powerhouse of the cell?",
+      "--concept",
+      "mitochondria",
+      "--answer",
+      "mitochondria",
+      "--response",
+      "mitochondria"
+    ])) as KlPersistentQuizCommandResult;
+
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+
+    expect(trace.result.events.length).toBeGreaterThan(0);
+    expect(trace.result.events.every((event) => event.runId === result.result.runId)).toBe(true);
+    expect(trace.result.events.map((event) => event.stage)).toEqual(expect.arrayContaining(["grade"]));
+    expect(trace.result.events.map((event) => event.message)).toEqual(
+      result.result.traceEvents.map((event) => event.message)
+    );
   });
 
   test("second quiz with a db on the same concept increments mastery attempts and changes score", async () => {
@@ -984,6 +1161,29 @@ describe("kl CLI handler", () => {
     expect(countRows(dbPath, "mastery")).toBe(1);
   });
 
+  test("teachback with a db persists returned grade trace events for trace queries", async () => {
+    const dbPath = createTeachbackDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+
+    const result = (await handleKlCommand([
+      "teachback",
+      "--db",
+      dbPath,
+      "--concept",
+      "retrieval-practice",
+      "--transcript",
+      "Retrieval practice uses active recall before review to strengthen memory."
+    ])) as KlPersistentTeachbackCommandResult;
+
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+
+    expect(trace.result.events.length).toBeGreaterThan(0);
+    expect(trace.result.events.every((event) => event.runId === result.result.runId)).toBe(true);
+    expect(trace.result.events.map((event) => event.stage)).toEqual(expect.arrayContaining(["grade"]));
+    expect(trace.result.events.map((event) => event.message)).toEqual(
+      result.result.traceEvents.map((event) => event.message)
+    );
+  });
+
   test("second teachback with a db on same concept increments mastery attempts", async () => {
     const dbPath = createTeachbackDb({ slug: "active-recall", name: "Active Recall" });
 
@@ -1142,6 +1342,12 @@ describe("kl CLI handler", () => {
       lowestScore: 0.2
     });
     expect(result.result.traceEvents).toHaveLength(1);
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+    expect(trace.result.events[0]).toMatchObject({
+      runId: result.result.runId,
+      stage: "diagnose",
+      message: "Persistent weak spots diagnosed"
+    });
   });
 
   test("diagnose with threshold and limit applies options deterministically", async () => {
@@ -1167,16 +1373,24 @@ describe("kl CLI handler", () => {
     });
   });
 
-  test("diagnose is read-only from the CLI", async () => {
+  test("diagnose persists only returned trace events from the CLI", async () => {
     const dbPath = createDiagnoseDb([
       { slug: "alpha", name: "Alpha", score: 0.2 },
       { slug: "beta", name: "Beta", score: 0.9 }
     ]);
-    const beforeRows = countMutableRows(dbPath);
+    const beforeDomainRows = countDomainRows(dbPath);
+    const beforeTraceRows = countRows(dbPath, "trace_events");
 
-    await handleKlCommand(["diagnose", "--db", dbPath, "--threshold", "0.8"]);
+    const result = await handleKlCommand(["diagnose", "--db", dbPath, "--threshold", "0.8"]);
 
-    expect(countMutableRows(dbPath)).toEqual(beforeRows);
+    expect(result.command).toBe("diagnose");
+    expect(result.mode).toBe("mock-persistent");
+    if (result.command !== "diagnose" || result.mode !== "mock-persistent") {
+      throw new Error("Expected persistent diagnose result.");
+    }
+    await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+    expect(countDomainRows(dbPath)).toEqual(beforeDomainRows);
+    expect(countRows(dbPath, "trace_events")).toBe(beforeTraceRows + result.result.traceEvents.length);
   });
 
   test("diagnose rejects a missing db without creating it", async () => {

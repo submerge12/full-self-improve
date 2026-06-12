@@ -6,12 +6,12 @@ import Database from "better-sqlite3";
 
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
-import { listTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
+import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
 import {
   diagnosePersistentWeakSpots,
   type PersistentDiagnoseResult
 } from "../engine/persistent-diagnose.js";
-import { TRACE_STAGES, type TraceStage } from "../engine/trace.js";
+import { createRunId, TRACE_STAGES, type TraceEvent, type TraceStage } from "../engine/trace.js";
 import {
   createDailyPlan,
   gradeQuizAttempt,
@@ -178,10 +178,12 @@ async function runIngestCommand(args: readonly string[]): Promise<KlIngestComman
     const db = new Database(dbPath);
     try {
       applyMigrations(db);
+      const result = await runPersistentMockIngest(db, adapter, { runId: createRunId("persistent-ingest") });
+      persistCommandTraceEvents(db, result);
       return {
         command: "ingest",
         mode: "mock-persistent",
-        result: await runPersistentMockIngest(db, adapter)
+        result
       };
     } finally {
       db.close();
@@ -208,10 +210,12 @@ function runPlanCommand(args: readonly string[]): KlPlanCommandResult {
     const db = new Database(dbPath);
     try {
       applyMigrations(db);
+      const result = createPersistentDailyPlan(db, { date, runId: createRunId("persistent-plan") });
+      persistCommandTraceEvents(db, result);
       return {
         command: "plan",
         mode: "mock-persistent",
-        result: createPersistentDailyPlan(db, { date })
+        result
       };
     } finally {
       db.close();
@@ -242,15 +246,18 @@ function runQuizCommand(args: readonly string[]): KlQuizCommandResult {
     const db = new Database(dbPath);
     try {
       applyMigrations(db);
+      const result = gradePersistentExactQuizAttempt(db, {
+        conceptSlug,
+        statement: itemId,
+        answers,
+        response,
+        runId: createRunId("persistent-quiz")
+      });
+      persistCommandTraceEvents(db, result);
       return {
         command: "quiz",
         mode: "mock-persistent",
-        result: gradePersistentExactQuizAttempt(db, {
-          conceptSlug,
-          statement: itemId,
-          answers,
-          response
-        })
+        result
       };
     } finally {
       db.close();
@@ -280,13 +287,16 @@ function runTeachbackCommand(args: readonly string[]): KlTeachbackCommandResult 
 
   try {
     applyMigrations(db);
+    const result = gradePersistentTeachback(db, {
+      conceptSlug,
+      transcript,
+      runId: createRunId("persistent-teachback")
+    });
+    persistCommandTraceEvents(db, result);
     return {
       command: "teachback",
       mode: "mock-persistent",
-      result: gradePersistentTeachback(db, {
-        conceptSlug,
-        transcript
-      })
+      result
     };
   } finally {
     db.close();
@@ -300,16 +310,19 @@ function runDiagnoseCommand(args: readonly string[]): KlDiagnoseCommandResult {
   const limitValue = optionalOne(options, "--limit", "diagnose");
   const masteryThreshold = thresholdValue === undefined ? undefined : parseUnitNumber(thresholdValue, "--threshold");
   const limit = limitValue === undefined ? undefined : parsePositiveSafeInteger(limitValue, "--limit");
-  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  const db = new Database(dbPath, { fileMustExist: true });
 
   try {
+    const result = diagnosePersistentWeakSpots(db, {
+      ...(masteryThreshold === undefined ? {} : { masteryThreshold }),
+      ...(limit === undefined ? {} : { limit }),
+      runId: createRunId("persistent-diagnose")
+    });
+    persistCommandTraceEvents(db, result);
     return {
       command: "diagnose",
       mode: "mock-persistent",
-      result: diagnosePersistentWeakSpots(db, {
-        ...(masteryThreshold === undefined ? {} : { masteryThreshold }),
-        ...(limit === undefined ? {} : { limit })
-      })
+      result
     };
   } finally {
     db.close();
@@ -372,6 +385,14 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
   }
 
   return options;
+}
+
+function persistCommandTraceEvents(db: Database.Database, result: { traceEvents: readonly TraceEvent[] }): void {
+  if (result.traceEvents.length === 0) {
+    return;
+  }
+
+  persistTraceEvents(db, result.traceEvents);
 }
 
 function parseUnitNumber(value: string, optionName: string): number {

@@ -5,9 +5,15 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, test } from "vitest";
 
+import { createPage, createSourceWithChunk } from "../db/content-store.js";
 import { createConcept, type ConceptStatus } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
-import { handleKlCommand, type KlCommandResult, type KlPersistentQuizCommandResult } from "./kl.js";
+import {
+  handleKlCommand,
+  type KlCommandResult,
+  type KlPersistentQuizCommandResult,
+  type KlPersistentTeachbackCommandResult
+} from "./kl.js";
 
 function createCapture(): { sink: { write(chunk: string | Uint8Array): boolean }; text(): string } {
   let output = "";
@@ -29,7 +35,16 @@ function parseCapturedJson(capture: { text(): string }): KlCommandResult {
   return JSON.parse(capture.text()) as KlCommandResult;
 }
 
-type CountableTable = "sources" | "chunks" | "concepts" | "pages" | "study_plans" | "items" | "attempts" | "mastery";
+type CountableTable =
+  | "sources"
+  | "chunks"
+  | "concepts"
+  | "pages"
+  | "study_plans"
+  | "items"
+  | "attempts"
+  | "teachbacks"
+  | "mastery";
 
 function countRows(dbPath: string, table: CountableTable): number {
   const db = new Database(dbPath, { readonly: true });
@@ -49,6 +64,44 @@ function createPlanDb(concepts: Array<{ slug: string; name: string; status?: Con
     applyMigrations(db);
     for (const concept of concepts) {
       createConcept(db, concept);
+    }
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
+function createTeachbackDb(input: {
+  slug: string;
+  name: string;
+  pageMarkdown?: string;
+  chunkText?: string;
+  createPage?: boolean;
+}): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-teachback-db-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    const concept = createConcept(db, { slug: input.slug, name: input.name, status: "generated" });
+    const { chunk } = createSourceWithChunk(db, {
+      adapterId: "fixture",
+      docRef: `${input.slug}.md`,
+      title: `${input.name} notes`,
+      fingerprint: `fingerprint-${input.slug}`,
+      chunkText: input.chunkText ?? "Teachback fixtures need grounded citation chunks."
+    });
+
+    if (input.createPage ?? true) {
+      createPage(db, {
+        conceptId: concept.id,
+        version: 1,
+        markdown:
+          input.pageMarkdown ?? "Retrieval practice uses active recall before review to strengthen durable memory.",
+        citationIds: [chunk.id],
+        visibility: "private"
+      });
     }
   } finally {
     db.close();
@@ -90,6 +143,36 @@ function readQuizRows(dbPath: string): {
       })),
       attempts
     };
+  } finally {
+    db.close();
+  }
+}
+
+function readTeachbackRows(dbPath: string): Array<{
+  id: number;
+  conceptSlug: string;
+  transcript: string;
+  rubricReport: unknown;
+}> {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .prepare(
+        `SELECT
+           teachbacks.id,
+           concepts.slug AS conceptSlug,
+           teachbacks.transcript,
+           teachbacks.rubric_report AS rubricReport
+         FROM teachbacks
+         INNER JOIN concepts ON concepts.id = teachbacks.concept_id
+         ORDER BY teachbacks.id`
+      )
+      .all() as Array<{ id: number; conceptSlug: string; transcript: string; rubricReport: string }>;
+
+    return rows.map((row) => ({
+      ...row,
+      rubricReport: JSON.parse(row.rubricReport) as unknown
+    }));
   } finally {
     db.close();
   }
@@ -542,5 +625,178 @@ describe("kl CLI handler", () => {
         "1"
       ])
     ).rejects.toThrow(/Unknown option for quiz: --bogus/);
+  });
+
+  test("teachback with a db persists transcript/report and returns persistent mode", async () => {
+    const dbPath = createTeachbackDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "teachback",
+        "--db",
+        dbPath,
+        "--concept",
+        "retrieval-practice",
+        "--transcript",
+        "  Retrieval practice uses active recall before review to strengthen memory.  "
+      ],
+      { stdout: stdout.sink }
+    )) as KlPersistentTeachbackCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result.command).toBe("teachback");
+    expect(result.mode).toBe("mock-persistent");
+    expect(result.result).toMatchObject({
+      conceptSlug: "retrieval-practice",
+      transcript: "Retrieval practice uses active recall before review to strengthen memory.",
+      gradingMethod: "rubric",
+      mastery: {
+        attemptsN: 1
+      }
+    });
+    expect(result.result.teachbackId).toBeGreaterThan(0);
+    expect(result.result.rubricReport.page).toMatchObject({
+      conceptSlug: "retrieval-practice",
+      version: 1
+    });
+    expect(result.result.rubricReport.score).toBeGreaterThan(0);
+    expect(readTeachbackRows(dbPath)).toEqual([
+      {
+        id: result.result.teachbackId,
+        conceptSlug: "retrieval-practice",
+        transcript: "Retrieval practice uses active recall before review to strengthen memory.",
+        rubricReport: result.result.rubricReport
+      }
+    ]);
+    expect(countRows(dbPath, "teachbacks")).toBe(1);
+    expect(countRows(dbPath, "mastery")).toBe(1);
+  });
+
+  test("second teachback with a db on same concept increments mastery attempts", async () => {
+    const dbPath = createTeachbackDb({ slug: "active-recall", name: "Active Recall" });
+
+    const first = (await handleKlCommand([
+      "teachback",
+      "--db",
+      dbPath,
+      "--concept",
+      "active-recall",
+      "--transcript",
+      "Active recall asks you to recall knowledge before review."
+    ])) as KlPersistentTeachbackCommandResult;
+    const second = (await handleKlCommand([
+      "teachback",
+      "--db",
+      dbPath,
+      "--concept",
+      "active-recall",
+      "--transcript",
+      "This answer is unrelated to the lesson."
+    ])) as KlPersistentTeachbackCommandResult;
+
+    expect(first.mode).toBe("mock-persistent");
+    expect(second.mode).toBe("mock-persistent");
+    expect(first.result.mastery.attemptsN).toBe(1);
+    expect(second.result.mastery.attemptsN).toBe(2);
+    expect(countRows(dbPath, "teachbacks")).toBe(2);
+    expect(countRows(dbPath, "mastery")).toBe(1);
+  });
+
+  test("teachback with a db rejects missing page without partial writes", async () => {
+    const dbPath = createTeachbackDb({ slug: "no-page", name: "No Page", createPage: false });
+
+    await expect(
+      handleKlCommand([
+        "teachback",
+        "--db",
+        dbPath,
+        "--concept",
+        "no-page",
+        "--transcript",
+        "This explanation has no page to grade against."
+      ])
+    ).rejects.toThrow(/No page was found for concept no-page/);
+
+    expect(countRows(dbPath, "teachbacks")).toBe(0);
+    expect(countRows(dbPath, "mastery")).toBe(0);
+  });
+
+  test("teachback requires exactly one db and required options", async () => {
+    const dbPath = createTeachbackDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(
+      handleKlCommand([
+        "teachback",
+        "--concept",
+        "retrieval-practice",
+        "--transcript",
+        "A valid explanation."
+      ])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand([
+        "teachback",
+        "--db",
+        dbPath,
+        "--db",
+        otherDbPath,
+        "--concept",
+        "retrieval-practice",
+        "--transcript",
+        "A valid explanation."
+      ])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand(["teachback", "--db", dbPath, "--transcript", "A valid explanation."])
+    ).rejects.toThrow(/requires exactly one --concept/);
+    await expect(
+      handleKlCommand([
+        "teachback",
+        "--db",
+        dbPath,
+        "--concept",
+        "retrieval-practice",
+        "--concept",
+        "active-recall",
+        "--transcript",
+        "A valid explanation."
+      ])
+    ).rejects.toThrow(/requires exactly one --concept/);
+    await expect(
+      handleKlCommand(["teachback", "--db", dbPath, "--concept", "retrieval-practice"])
+    ).rejects.toThrow(/requires exactly one --transcript/);
+    await expect(
+      handleKlCommand([
+        "teachback",
+        "--db",
+        dbPath,
+        "--concept",
+        "retrieval-practice",
+        "--transcript",
+        "A valid explanation.",
+        "--transcript",
+        "Another explanation."
+      ])
+    ).rejects.toThrow(/requires exactly one --transcript/);
+  });
+
+  test("teachback rejects unknown options", async () => {
+    const dbPath = createTeachbackDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+
+    await expect(
+      handleKlCommand([
+        "teachback",
+        "--db",
+        dbPath,
+        "--concept",
+        "retrieval-practice",
+        "--transcript",
+        "A valid explanation.",
+        "--bogus",
+        "1"
+      ])
+    ).rejects.toThrow(/Unknown option for teachback: --bogus/);
   });
 });

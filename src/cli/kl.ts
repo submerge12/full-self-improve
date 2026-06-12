@@ -24,6 +24,10 @@ import {
   gradePersistentExactQuizAttempt,
   type PersistentQuizGradeResult
 } from "../engine/persistent-quiz.js";
+import {
+  gradePersistentTeachback,
+  type PersistentTeachbackGradeResult
+} from "../engine/persistent-teachback.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -76,7 +80,19 @@ export interface KlPersistentQuizCommandResult {
 
 export type KlQuizCommandResult = KlMockQuizCommandResult | KlPersistentQuizCommandResult;
 
-export type KlCommandResult = KlIngestCommandResult | KlPlanCommandResult | KlQuizCommandResult;
+export interface KlPersistentTeachbackCommandResult {
+  command: "teachback";
+  mode: "mock-persistent";
+  result: PersistentTeachbackGradeResult;
+}
+
+export type KlTeachbackCommandResult = KlPersistentTeachbackCommandResult;
+
+export type KlCommandResult =
+  | KlIngestCommandResult
+  | KlPlanCommandResult
+  | KlQuizCommandResult
+  | KlTeachbackCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -97,7 +113,11 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
     return runQuizCommand(args);
   }
 
-  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz.`);
+  if (command === "teachback") {
+    return runTeachbackCommand(args);
+  }
+
+  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback.`);
 }
 
 export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO = {}): Promise<KlCommandResult> {
@@ -210,6 +230,28 @@ function runQuizCommand(args: readonly string[]): KlQuizCommandResult {
       response
     })
   };
+}
+
+function runTeachbackCommand(args: readonly string[]): KlTeachbackCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--concept", "--transcript"]), "teachback");
+  const dbPath = requireOne(options, "--db", "teachback");
+  const conceptSlug = requireOne(options, "--concept", "teachback");
+  const transcript = requireOne(options, "--transcript", "teachback");
+  const db = new Database(dbPath);
+
+  try {
+    applyMigrations(db);
+    return {
+      command: "teachback",
+      mode: "mock-persistent",
+      result: gradePersistentTeachback(db, {
+        conceptSlug,
+        transcript
+      })
+    };
+  } finally {
+    db.close();
+  }
 }
 
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {

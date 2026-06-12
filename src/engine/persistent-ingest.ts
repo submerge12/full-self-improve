@@ -10,7 +10,7 @@ import {
   type MockIngestSource,
   type MockPage
 } from "./mock-commands.js";
-import type { SourceAdapter } from "./source-adapter.js";
+import type { DocRef, RawDoc, SourceAdapter } from "./source-adapter.js";
 import type { TraceEvent, TraceLevel, TraceStage } from "./trace.js";
 
 export interface PersistentMockIngestSummary {
@@ -29,7 +29,8 @@ export async function runPersistentMockIngest(
   adapter: SourceAdapter,
   options: MockIngestOptions = {}
 ): Promise<PersistentMockIngestSummary> {
-  const mockResult = await runMockIngest(adapter, options);
+  const preflight = await preflightSources(db, adapter);
+  const mockResult = await runMockIngest(new PreflightSourceAdapter(adapter, preflight.refsForProcessing), options);
   const fallbackTraceEvents: TraceEvent[] = [];
   const context: PersistenceContext = {
     runId: mockResult.runId,
@@ -38,13 +39,18 @@ export async function runPersistentMockIngest(
   };
 
   const counts = persistMockResult(db, mockResult, context);
+  recordPreflightSkippedSources(preflight.skippedUnchangedSources, context);
   const traceEvents =
     options.trace?.getEvents({ runId: mockResult.runId }) ?? [...mockResult.traceEvents, ...fallbackTraceEvents];
 
   return {
     runId: mockResult.runId,
-    sourcesSeen: mockResult.sources.length,
-    ...counts,
+    sourcesSeen: preflight.sourcesSeen,
+    sourcesProcessed: counts.sourcesProcessed,
+    sourcesSkipped: counts.sourcesSkipped + preflight.skippedUnchangedSources.length,
+    chunksCreated: counts.chunksCreated,
+    conceptsCreated: counts.conceptsCreated,
+    pagesCreated: counts.pagesCreated,
     traceEvents
   };
 }
@@ -75,6 +81,86 @@ interface IdRow {
 interface ChunkRow {
   id: number;
   seq: number;
+}
+
+interface PreflightSkippedSource {
+  adapterId: string;
+  ref: DocRef;
+  fingerprint: string;
+}
+
+interface PreflightResult {
+  sourcesSeen: number;
+  refsForProcessing: DocRef[];
+  skippedUnchangedSources: PreflightSkippedSource[];
+}
+
+class PreflightSourceAdapter implements SourceAdapter {
+  readonly id: string;
+  readonly kind: string;
+
+  constructor(
+    private readonly adapter: SourceAdapter,
+    private readonly refs: readonly DocRef[]
+  ) {
+    this.id = adapter.id;
+    this.kind = adapter.kind;
+  }
+
+  async *listDocuments(): AsyncIterable<DocRef> {
+    for (const ref of this.refs) {
+      yield ref;
+    }
+  }
+
+  readDocument(ref: DocRef): Promise<RawDoc> {
+    return this.adapter.readDocument(ref);
+  }
+
+  fingerprint(ref: DocRef): string {
+    return this.adapter.fingerprint(ref);
+  }
+}
+
+async function preflightSources(db: Database.Database, adapter: SourceAdapter): Promise<PreflightResult> {
+  const statements = preparePreflightStatements(db);
+  const refsForProcessing: DocRef[] = [];
+  const skippedUnchangedSources: PreflightSkippedSource[] = [];
+  let sourcesSeen = 0;
+
+  for await (const ref of adapter.listDocuments()) {
+    sourcesSeen += 1;
+    const fingerprint = adapter.fingerprint(ref);
+    const existing = statements.selectSource.get(adapter.id, ref.path) as SourceRow | undefined;
+    if (existing !== undefined && existing.fingerprint === fingerprint) {
+      skippedUnchangedSources.push({ adapterId: adapter.id, ref, fingerprint });
+    } else {
+      refsForProcessing.push(ref);
+    }
+  }
+
+  return { sourcesSeen, refsForProcessing, skippedUnchangedSources };
+}
+
+function preparePreflightStatements(db: Database.Database) {
+  return {
+    selectSource: db.prepare(
+      `SELECT id, fingerprint
+       FROM sources
+       WHERE adapter_id = ? AND doc_ref = ?`
+    )
+  };
+}
+
+function recordPreflightSkippedSources(sources: PreflightSkippedSource[], context: PersistenceContext): void {
+  for (const source of sources) {
+    recordPersistentTrace(context, "chunk", "info", "Skipped unchanged source.", {
+      outcome: "skipped_unchanged",
+      adapterId: source.adapterId,
+      docRef: source.ref.path,
+      fingerprint: source.fingerprint
+    });
+  }
 }
 
 function persistMockResult(

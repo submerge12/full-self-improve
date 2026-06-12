@@ -196,6 +196,72 @@ describe("persistent mock ingest", () => {
     expect(skipEvents.map((event) => traceDataDocRef(event.data))).toEqual(["advanced.md", "fundamentals.md"]);
   });
 
+  test("preflights unchanged sources before the mock pipeline on a second run", async () => {
+    const adapter = createFixtureAdapter();
+    await runPersistentMockIngest(db, adapter, { runId: "persistent-first" });
+
+    const summary = await runPersistentMockIngest(db, adapter, { runId: "persistent-second" });
+
+    expect(summary).toMatchObject({
+      runId: "persistent-second",
+      sourcesSeen: 2,
+      sourcesProcessed: 0,
+      sourcesSkipped: 2,
+      chunksCreated: 0,
+      conceptsCreated: 0,
+      pagesCreated: 0
+    });
+    expect(summary.traceEvents.filter((event) => event.stage === "extract")).toEqual([]);
+    expect(summary.traceEvents.filter((event) => event.stage === "page-gen")).toEqual([]);
+    expect(
+      summary.traceEvents.filter(
+        (event) => event.stage === "chunk" && traceDataOutcome(event.data) !== "skipped_unchanged"
+      )
+    ).toEqual([]);
+    expect(
+      summary.traceEvents.filter(
+        (event) => event.stage === "chunk" && traceDataOutcome(event.data) === "skipped_unchanged"
+      )
+    ).toHaveLength(2);
+  });
+
+  test("preflights unchanged sources while processing a newly added source", async () => {
+    const adapter = createFixtureAdapter();
+    await runPersistentMockIngest(db, adapter, { runId: "persistent-first" });
+    adapter.addDocument({
+      id: "fresh.md",
+      title: "Fresh",
+      text: "# Fresh\nFresh idea."
+    });
+
+    const summary = await runPersistentMockIngest(db, adapter, { runId: "persistent-mixed" });
+
+    expect(summary).toMatchObject({
+      runId: "persistent-mixed",
+      sourcesSeen: 3,
+      sourcesProcessed: 1,
+      sourcesSkipped: 2,
+      chunksCreated: 1,
+      conceptsCreated: 1,
+      pagesCreated: 1
+    });
+    expect(
+      summary.traceEvents
+        .filter((event) => event.stage === "extract")
+        .map((event) => traceDataSourceId(event.data))
+    ).toEqual(["fresh.md"]);
+    expect(
+      summary.traceEvents
+        .filter((event) => event.stage === "chunk" && traceDataOutcome(event.data) !== "skipped_unchanged")
+        .map((event) => traceDataSourceId(event.data))
+    ).toEqual(["fresh.md"]);
+    expect(
+      summary.traceEvents
+        .filter((event) => event.stage === "chunk" && traceDataOutcome(event.data) === "skipped_unchanged")
+        .map((event) => traceDataDocRef(event.data))
+    ).toEqual(["advanced.md", "fundamentals.md"]);
+  });
+
   test("skips changed source fingerprints safely without overwriting existing rows", async () => {
     const adapter = new FixtureSourceAdapter([
       {
@@ -459,5 +525,11 @@ function traceDataOutcome(data: unknown): string | undefined {
 function traceDataDocRef(data: unknown): string | undefined {
   return typeof data === "object" && data !== null && "docRef" in data
     ? String((data as { docRef: unknown }).docRef)
+    : undefined;
+}
+
+function traceDataSourceId(data: unknown): string | undefined {
+  return typeof data === "object" && data !== null && "sourceId" in data
+    ? String((data as { sourceId: unknown }).sourceId)
     : undefined;
 }

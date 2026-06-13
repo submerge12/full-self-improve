@@ -5,6 +5,13 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 import {
+  agentDayInputFromConfig,
+  agentInputFromConfig,
+  loadAgentRuntimeConfig,
+  type AgentDryRunDefaults,
+  type AgentRuntimeConfig
+} from "../agents/config.js";
+import {
   createAgentDayDryRunPlan,
   createAgentDryRunPlan,
   type AgentDayDryRunPlan,
@@ -401,22 +408,17 @@ function runAgentCommand(args: readonly string[]): KlAgentCommandResult {
     throw new UsageError("Command agent currently supports only --dry-run.");
   }
 
+  const config = loadOptionalAgentConfig(options, "agent");
   const role = parseAgentRole(requireOne(options, "--role", "agent"));
   const phaseValue = optionalOne(options, "--phase", "agent");
   const date = requireOne(options, "--date", "agent");
-  const knowledgeLoopBaseUrl = optionalOne(options, "--knowledge-loop-url", "agent");
-  const compassHealthBaseUrl = optionalOne(options, "--compass-health-url", "agent");
-  const adapterId = optionalOne(options, "--adapter", "agent");
-  const multicaBoard = optionalOne(options, "--board", "agent");
-  const result = createAgentDryRunPlan({
+  const result = createAgentDryRunPlan(agentInputFromConfig({
+    config,
+    overrides: agentDryRunOverrides(options, "agent"),
     role,
     ...(phaseValue === undefined ? {} : { phase: parseAgentPhase(phaseValue) }),
-    date,
-    ...(knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl }),
-    ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
-    ...(adapterId === undefined ? {} : { adapterId }),
-    ...(multicaBoard === undefined ? {} : { multicaBoard })
-  });
+    date
+  }));
 
   return {
     command: "agent",
@@ -431,18 +433,15 @@ function runAgentDayCommand(args: readonly string[]): KlAgentDayCommandResult {
     throw new UsageError("Command agent-day currently supports only --dry-run.");
   }
 
+  const config = loadOptionalAgentConfig(options, "agent-day");
   const date = requireOne(options, "--date", "agent-day");
-  const knowledgeLoopBaseUrl = optionalOne(options, "--knowledge-loop-url", "agent-day");
-  const compassHealthBaseUrl = optionalOne(options, "--compass-health-url", "agent-day");
-  const adapterId = optionalOne(options, "--adapter", "agent-day");
-  const multicaBoard = optionalOne(options, "--board", "agent-day");
-  const result = createAgentDayDryRunPlan({
-    date,
-    ...(knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl }),
-    ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
-    ...(adapterId === undefined ? {} : { adapterId }),
-    ...(multicaBoard === undefined ? {} : { multicaBoard })
-  });
+  const result = createAgentDayDryRunPlan(
+    agentDayInputFromConfig({
+      config,
+      overrides: agentDryRunOverrides(options, "agent-day"),
+      date
+    })
+  );
 
   return {
     command: "agent-day",
@@ -482,7 +481,16 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
 function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
   return parseFlaggedOptions(
     args,
-    new Set(["--role", "--phase", "--date", "--knowledge-loop-url", "--compass-health-url", "--adapter", "--board"]),
+    new Set([
+      "--role",
+      "--phase",
+      "--date",
+      "--knowledge-loop-url",
+      "--compass-health-url",
+      "--adapter",
+      "--board",
+      "--config"
+    ]),
     "agent"
   );
 }
@@ -490,9 +498,29 @@ function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options:
 function parseAgentDayOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
   return parseFlaggedOptions(
     args,
-    new Set(["--date", "--knowledge-loop-url", "--compass-health-url", "--adapter", "--board"]),
+    new Set(["--date", "--knowledge-loop-url", "--compass-health-url", "--adapter", "--board", "--config"]),
     "agent-day"
   );
+}
+
+function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {
+  const configPath = optionalOne(options, "--config", command);
+
+  return configPath === undefined ? undefined : loadAgentRuntimeConfig(configPath);
+}
+
+function agentDryRunOverrides(options: Map<string, string[]>, command: string): AgentDryRunDefaults {
+  const knowledgeLoopBaseUrl = optionalOne(options, "--knowledge-loop-url", command);
+  const compassHealthBaseUrl = optionalOne(options, "--compass-health-url", command);
+  const adapterId = optionalOne(options, "--adapter", command);
+  const multicaBoard = optionalOne(options, "--board", command);
+
+  return {
+    ...(knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl }),
+    ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
+    ...(adapterId === undefined ? {} : { adapterId }),
+    ...(multicaBoard === undefined ? {} : { multicaBoard })
+  };
 }
 
 function parseFlaggedOptions(

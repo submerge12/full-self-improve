@@ -10,7 +10,14 @@ import {
   type ApiHandlerResponseBody,
   type ApiRequest
 } from "../../../api/handlers.js";
-import type { ApiMethod, ApiResponse } from "../../../api/contracts.js";
+import {
+  ApiAuthConfigurationError,
+  ApiAuthError,
+  authorizeApiRequest,
+  findApiRoute,
+  type ApiMethod,
+  type ApiResponse
+} from "../../../api/contracts.js";
 
 export interface RuntimeApiContext {
   readonly context: ApiHandlerContext;
@@ -55,12 +62,19 @@ export async function handleWebApiRequest(request: Request, options: WebApiRoute
   const runtime = (options.contextFactory ?? createRuntimeApiContext)();
 
   try {
+    const path = pathWithSearch(options.path, request.url);
+    const headers = headersToRecord(request.headers);
+    const authResponse = authorizeWebRequest(options.method, path, headers, runtime.context.expectedBearerToken);
+    if (authResponse !== undefined) {
+      return Response.json(authResponse.body, { status: authResponse.status });
+    }
+
     const body = await requestBody(request);
     const apiResponse = await (options.handleRequest ?? handleApiRequest)(
       {
         method: options.method,
-        path: pathWithSearch(options.path, request.url),
-        headers: headersToRecord(request.headers),
+        path,
+        headers,
         body
       },
       runtime.context
@@ -118,6 +132,63 @@ export const __routeAdapterInternals = {
     runtimeApiContextTestHooks = {};
   }
 };
+
+function authorizeWebRequest(
+  method: ApiMethod,
+  path: string,
+  headers: ApiRequest["headers"],
+  expectedBearerToken: string | undefined
+): ApiResponse<ApiHandlerResponseBody> | undefined {
+  const route = findApiRoute(method, path);
+  if (route === undefined || route.auth === "public_read") {
+    return undefined;
+  }
+
+  try {
+    authorizeApiRequest(route, headers, expectedBearerToken);
+    return undefined;
+  } catch (error) {
+    if (error instanceof ApiAuthConfigurationError) {
+      return {
+        status: 500,
+        body: {
+          ok: false,
+          error: {
+            code: "auth_not_configured",
+            message: error.message,
+            routeId: route.id
+          }
+        }
+      };
+    }
+
+    if (error instanceof ApiAuthError) {
+      return {
+        status: 401,
+        body: {
+          ok: false,
+          error: {
+            code: "unauthorized",
+            message: error.message,
+            routeId: route.id
+          }
+        }
+      };
+    }
+
+    return {
+      status: 500,
+      body: {
+        ok: false,
+        error: {
+          code: "unexpected_error",
+          message: "Unexpected API handler error.",
+          routeId: route.id
+        }
+      }
+    };
+  }
+}
 
 function headersToRecord(headers: Headers): ApiRequest["headers"] {
   const record: Record<string, string> = {};

@@ -90,7 +90,10 @@ describe("Next app route adapter", () => {
     const response = await handleWebApiRequest(
       new Request("https://example.test/api/quiz/grade", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          authorization: "Bearer secret",
+          "content-type": "application/json"
+        },
         body: "{\"conceptSlug\":"
       }),
       {
@@ -165,6 +168,155 @@ describe("Next app route adapter", () => {
     expect(quizGradeRuntime).toBe("nodejs");
     expect(teachbackRuntime).toBe("nodejs");
     expect(wikiPagesRuntime).toBe("nodejs");
+  });
+
+  test("actual protected route modules accept bearer-authenticated Web requests", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-${Date.now()}.db`);
+    const vaultRoot = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-vault-${Date.now()}`);
+    const vaultFile = path.join(vaultRoot, "vault-topic.md");
+    tempFiles.push(dbPath);
+    tempFiles.push(vaultFile);
+    tempDirs.push(vaultRoot);
+    mkdirSync(vaultRoot);
+    writeFileSync(vaultFile, "# Vault Topic\nA grounded vault topic.", "utf8");
+    seedAuthenticatedRouteData(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+    process.env.KNOWLEDGE_LOOP_VAULT_ROOT = vaultRoot;
+
+    const responses = [
+      await ingestRunPost(
+        new Request("https://example.test/api/ingest/run?adapter=holly-vault", {
+          method: "POST",
+          headers: { authorization: "Bearer env-secret" }
+        })
+      ),
+      await planTodayGet(
+        new Request("https://example.test/api/plan/today", {
+          headers: { authorization: "Bearer env-secret" }
+        })
+      ),
+      await planGeneratePost(
+        new Request("https://example.test/api/plan/generate", {
+          method: "POST",
+          headers: { authorization: "Bearer env-secret" }
+        })
+      ),
+      await masterySummaryGet(
+        new Request("https://example.test/api/mastery/summary", {
+          headers: { authorization: "Bearer env-secret" }
+        })
+      ),
+      await quizGradePost(
+        jsonRequest("https://example.test/api/quiz/grade", {
+          conceptSlug: "quiz-topic",
+          statement: "What is the answer?",
+          answer: "memory",
+          response: "memory"
+        })
+      ),
+      await teachbackPost(
+        jsonRequest("https://example.test/api/teachback", {
+          conceptSlug: "teachback-topic",
+          transcript: "Teachback topics use active recall and cited source evidence."
+        })
+      )
+    ];
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    await expectResponseRouteIds(responses, [
+      "ingest.run",
+      "plan.today",
+      "plan.generate",
+      "mastery.summary",
+      "quiz.grade",
+      "teachback.submit"
+    ]);
+  });
+
+  test("actual protected route modules reject missing configured bearer tokens before body handling", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-config-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    delete process.env.KNOWLEDGE_LOOP_API_TOKEN;
+
+    const response = await planGeneratePost(
+      new Request("https://example.test/api/plan/generate", {
+        method: "POST",
+        headers: { authorization: "Bearer env-secret" }
+      })
+    );
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code: "auth_not_configured", routeId: "plan.generate" }
+    });
+  });
+
+  test("actual protected route modules reject wrong bearer tokens before body handling", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-wrong-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const response = await planGeneratePost(
+      new Request("https://example.test/api/plan/generate", {
+        method: "POST",
+        headers: { authorization: "Bearer wrong-secret" }
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "plan.generate" }
+    });
+  });
+
+  test("actual mutation route modules reject unauthenticated Web requests before body handling", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-mutations-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const mutationRoutes = [
+      { routeId: "ingest.run", handler: ingestRunPost, url: "https://example.test/api/ingest/run?adapter=fixture" },
+      { routeId: "plan.generate", handler: planGeneratePost, url: "https://example.test/api/plan/generate" },
+      { routeId: "quiz.grade", handler: quizGradePost, url: "https://example.test/api/quiz/grade" },
+      { routeId: "teachback.submit", handler: teachbackPost, url: "https://example.test/api/teachback" }
+    ] as const;
+
+    for (const route of mutationRoutes) {
+      const response = await route.handler(new Request(route.url, { method: "POST" }));
+
+      expect(response.status).toBe(401);
+      expect(await response.json()).toMatchObject({
+        ok: false,
+        error: { code: "unauthorized", routeId: route.routeId }
+      });
+    }
+  });
+
+  test("actual mutation route modules reject unauthenticated malformed JSON before parsing the body", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-malformed-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const response = await quizGradePost(
+      new Request("https://example.test/api/quiz/grade", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"conceptSlug\":"
+      })
+    );
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "quiz.grade" }
+    });
   });
 
   test("runtime context factory reads env DB path and token and closes its DB", () => {
@@ -335,4 +487,46 @@ function seedWikiPages(db: Database.Database): void {
     citationIds: [privateChunk.id],
     visibility: "private"
   });
+}
+
+function seedAuthenticatedRouteData(dbPath: string): void {
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    createConcept(db, { slug: "quiz-topic", name: "Quiz Topic", status: "generated" });
+    const concept = createConcept(db, { slug: "teachback-topic", name: "Teachback Topic", status: "generated" });
+    const { chunk } = createSourceWithChunk(db, {
+      adapterId: "fixture",
+      docRef: "teachback.md",
+      title: "Teachback",
+      fingerprint: "teachback",
+      chunkText: "Teachback topics use active recall and cited source evidence."
+    });
+    createPage(db, {
+      conceptId: concept.id,
+      version: 1,
+      markdown: "Teachback topics use active recall and cited source evidence.",
+      citationIds: [chunk.id],
+      visibility: "private"
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function jsonRequest(url: string, body: Record<string, unknown>): Request {
+  return new Request(url, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer env-secret",
+      "content-type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+}
+
+async function expectResponseRouteIds(responses: readonly Response[], routeIds: readonly string[]): Promise<void> {
+  const bodies = await Promise.all(responses.map((response) => response.json() as Promise<{ routeId?: string }>));
+
+  expect(bodies.map((body) => body.routeId)).toEqual(routeIds);
 }

@@ -1,0 +1,24 @@
+# Part 2.5 API External Bearer Smoke Step 3 - Reviewer Follow-up
+
+- Moved bearer preflight into `handleWebApiRequest` before body parsing by using the route manifest and existing `authorizeApiRequest` helper.
+- Kept pure handler auth unchanged; Web adapter preflight ensures unauthenticated protected App Route requests return auth errors before malformed body parsing.
+- Expanded bearer-authenticated App Route smoke to cover every protected route export:
+  - `POST /api/ingest/run?adapter=holly-vault`;
+  - `GET /api/plan/today`;
+  - `POST /api/plan/generate`;
+  - `GET /api/mastery/summary`;
+  - `POST /api/quiz/grade`;
+  - `POST /api/teachback`.
+- Added Web adapter coverage for missing configured bearer token and wrong bearer token.
+- Focused verification:
+  - `npm run test:unit -- src/app/api/_shared/route-adapter.test.ts`
+  - Result: 1 file passed, 17 tests passed.
+- Broader verification after reviewer follow-up:
+  - `npm run typecheck` passed.
+  - `npm run lint` passed.
+  - `npm run check` passed outside the Windows sandbox: 23 files, 272 tests.
+  - `npm audit --audit-level=moderate` reported 0 vulnerabilities.
+  - `git diff --check` exited 0 with only CRLF normalization warnings.
+- Re-review:
+  - Spec reviewer verdict: APPROVE; prior C1/I1 findings closed.
+  - Quality reviewer verdict: APPROVE; prior body-parsing concern closed after checkpoint count update.

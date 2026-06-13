@@ -26,6 +26,8 @@ class FixtureSourceAdapter implements SourceAdapter {
   readonly id = "fixture";
   readonly kind = "fixture";
   private fingerprintVersion = "v1";
+  private readonly readFailures = new Map<string, string>();
+  private readonly fingerprintFailures = new Map<string, string>();
 
   constructor(private readonly docs: FixtureDoc[]) {}
 
@@ -63,6 +65,18 @@ class FixtureSourceAdapter implements SourceAdapter {
     doc.links = links;
   }
 
+  failRead(docId: string, reason: string): void {
+    this.readFailures.set(docId, reason);
+  }
+
+  allowRead(docId: string): void {
+    this.readFailures.delete(docId);
+  }
+
+  failFingerprint(docId: string, reason: string): void {
+    this.fingerprintFailures.set(docId, reason);
+  }
+
   addDocument(doc: FixtureDoc): void {
     this.docs.push(doc);
   }
@@ -74,6 +88,11 @@ class FixtureSourceAdapter implements SourceAdapter {
   }
 
   async readDocument(ref: DocRef): Promise<RawDoc> {
+    const failure = this.readFailures.get(ref.id);
+    if (failure !== undefined) {
+      throw new Error(failure);
+    }
+
     const doc = this.docs.find((candidate) => candidate.id === ref.id);
     if (doc === undefined) {
       throw new Error(`Missing fixture doc: ${ref.id}`);
@@ -89,6 +108,11 @@ class FixtureSourceAdapter implements SourceAdapter {
   }
 
   fingerprint(ref: DocRef): string {
+    const failure = this.fingerprintFailures.get(ref.id);
+    if (failure !== undefined) {
+      throw new Error(failure);
+    }
+
     const doc = this.docs.find((candidate) => candidate.id === ref.id);
     const version = typeof doc?.metadata?.fingerprintVersion === "string"
       ? doc.metadata.fingerprintVersion
@@ -813,6 +837,268 @@ describe("persistent mock ingest", () => {
     ]);
   });
 
+  test("continues ingesting processable sources when one processing source read fails", async () => {
+    const adapter = new FixtureSourceAdapter([
+      {
+        id: "bad.md",
+        title: "Bad",
+        text: "# Bad\nBad body."
+      },
+      {
+        id: "good-a.md",
+        title: "Good A",
+        text: "# Good A\nGood A body."
+      },
+      {
+        id: "good-b.md",
+        title: "Good B",
+        text: "# Good B\nGood B body."
+      }
+    ]);
+    adapter.failRead("bad.md", "read denied for bad.md");
+
+    const summary = await runPersistentMockIngest(db, adapter, { runId: "persistent-read-failure" });
+
+    expect(summary).toMatchObject({
+      runId: "persistent-read-failure",
+      sourcesSeen: 3,
+      sourcesProcessed: 2,
+      sourcesSkipped: 0,
+      sourcesFailed: 1,
+      chunksCreated: 2,
+      conceptsCreated: 2,
+      pagesCreated: 2
+    });
+    expect(readSources()).toEqual([
+      {
+        adapterId: "fixture",
+        docRef: "bad.md",
+        title: "Bad",
+        fingerprint: "v1:bad.md:Bad",
+        status: "error"
+      },
+      {
+        adapterId: "fixture",
+        docRef: "good-a.md",
+        title: "Good A",
+        fingerprint: "v1:good-a.md:Good A",
+        status: "ingested"
+      },
+      {
+        adapterId: "fixture",
+        docRef: "good-b.md",
+        title: "Good B",
+        fingerprint: "v1:good-b.md:Good B",
+        status: "ingested"
+      }
+    ]);
+    expect(readChunksForSource("bad.md")).toEqual([]);
+    expect(readChunksForSource("good-a.md")).toMatchObject([{ seq: 1, text: "Good A body." }]);
+    expect(readChunksForSource("good-b.md")).toMatchObject([{ seq: 1, text: "Good B body." }]);
+
+    const errorEvents = summary.traceEvents.filter(
+      (event) => event.stage === "chunk" && event.level === "error" && traceDataOutcome(event.data) === "source_error"
+    );
+    expect(errorEvents).toHaveLength(1);
+    expect(errorEvents[0]?.data).toMatchObject({
+      outcome: "source_error",
+      docRef: "bad.md",
+      reason: "read denied for bad.md",
+      phase: "read"
+    });
+  });
+
+  test("rolls back source error rows when later persistence fails", async () => {
+    const adapter = new FixtureSourceAdapter([
+      {
+        id: "bad.md",
+        title: "Bad",
+        text: "# Bad\nBad body."
+      },
+      {
+        id: "good.md",
+        title: "Good",
+        text: "# Good\nGood body."
+      }
+    ]);
+    adapter.failRead("bad.md", "read denied for bad.md");
+    db.exec(`
+      CREATE TRIGGER fail_chunk_insert
+      BEFORE INSERT ON chunks
+      BEGIN
+        SELECT RAISE(ABORT, 'forced chunk persistence failure');
+      END;
+    `);
+
+    await expect(runPersistentMockIngest(db, adapter, { runId: "persistent-rollback-failure" }))
+      .rejects
+      .toThrow("forced chunk persistence failure");
+
+    expect(readSources()).toEqual([]);
+    expect(readTableCounts()).toEqual({
+      sources: 0,
+      chunks: 0,
+      concepts: 0,
+      conceptEdges: 0,
+      pages: 0
+    });
+  });
+
+  test("keeps existing content when a later re-ingest read fails and retries error sources", async () => {
+    const adapter = new FixtureSourceAdapter([
+      {
+        id: "flaky.md",
+        title: "Flaky",
+        text: "# Flaky\nOriginal body."
+      }
+    ]);
+    await runPersistentMockIngest(db, adapter, { runId: "persistent-flaky-original" });
+
+    adapter.setDocumentText("flaky.md", "# Flaky\nRecovered body.");
+    adapter.setDocumentFingerprintVersion("flaky.md", "v2");
+    adapter.failRead("flaky.md", "temporary read failure");
+    const failedSummary = await runPersistentMockIngest(db, adapter, { runId: "persistent-flaky-failed" });
+
+    expect(failedSummary).toMatchObject({
+      sourcesSeen: 1,
+      sourcesProcessed: 0,
+      sourcesSkipped: 0,
+      sourcesFailed: 1,
+      chunksCreated: 0,
+      conceptsCreated: 0,
+      pagesCreated: 0
+    });
+    expect(readSources()).toEqual([
+      {
+        adapterId: "fixture",
+        docRef: "flaky.md",
+        title: "Flaky",
+        fingerprint: "v2:flaky.md:Flaky",
+        status: "error"
+      }
+    ]);
+    expect(readChunksForSource("flaky.md")).toMatchObject([{ seq: 1, text: "Original body." }]);
+
+    adapter.allowRead("flaky.md");
+    const recoveredSummary = await runPersistentMockIngest(db, adapter, { runId: "persistent-flaky-recovered" });
+
+    expect(recoveredSummary).toMatchObject({
+      sourcesSeen: 1,
+      sourcesProcessed: 1,
+      sourcesSkipped: 0,
+      sourcesFailed: 0,
+      chunksCreated: 1,
+      conceptsCreated: 0,
+      pagesCreated: 1
+    });
+    expect(readSources()).toEqual([
+      {
+        adapterId: "fixture",
+        docRef: "flaky.md",
+        title: "Flaky",
+        fingerprint: "v2:flaky.md:Flaky",
+        status: "ingested"
+      }
+    ]);
+    expect(readChunksForSource("flaky.md")).toMatchObject([{ seq: 1, text: "Recovered body." }]);
+  });
+
+  test("marks unchanged skipped sources as error when skipped metadata read fails", async () => {
+    const adapter = createFixtureAdapter();
+    await runPersistentMockIngest(db, adapter, { runId: "persistent-skip-read-original" });
+    const beforeChunks = readChunksForSource("fundamentals.md");
+    adapter.failRead("fundamentals.md", "metadata read failed");
+
+    const summary = await runPersistentMockIngest(db, adapter, { runId: "persistent-skip-read-failed" });
+
+    expect(summary).toMatchObject({
+      sourcesSeen: 2,
+      sourcesProcessed: 0,
+      sourcesSkipped: 1,
+      sourcesFailed: 1,
+      chunksCreated: 0,
+      conceptsCreated: 0,
+      pagesCreated: 0
+    });
+    expect(readSources()).toEqual([
+      {
+        adapterId: "fixture",
+        docRef: "advanced.md",
+        title: "Advanced",
+        fingerprint: "v1:advanced.md:Advanced",
+        status: "ingested"
+      },
+      {
+        adapterId: "fixture",
+        docRef: "fundamentals.md",
+        title: "Fundamentals",
+        fingerprint: "v1:fundamentals.md:Fundamentals",
+        status: "error"
+      }
+    ]);
+    expect(readChunksForSource("fundamentals.md")).toEqual(beforeChunks);
+
+    const sourceErrorEvents = summary.traceEvents.filter(
+      (event) => event.stage === "chunk" && event.level === "error" && traceDataOutcome(event.data) === "source_error"
+    );
+    expect(sourceErrorEvents.map((event) => event.data)).toEqual([
+      expect.objectContaining({
+        docRef: "fundamentals.md",
+        reason: "metadata read failed",
+        phase: "read"
+      })
+    ]);
+  });
+
+  test("records fingerprint failures per source without aborting the run", async () => {
+    const adapter = new FixtureSourceAdapter([
+      {
+        id: "bad-fingerprint.md",
+        title: "Bad Fingerprint",
+        text: "# Bad Fingerprint\nBad body."
+      },
+      {
+        id: "good.md",
+        title: "Good",
+        text: "# Good\nGood body."
+      }
+    ]);
+    adapter.failFingerprint("bad-fingerprint.md", "fingerprint unavailable");
+
+    const summary = await runPersistentMockIngest(db, adapter, { runId: "persistent-fingerprint-failure" });
+
+    expect(summary).toMatchObject({
+      sourcesSeen: 2,
+      sourcesProcessed: 1,
+      sourcesSkipped: 0,
+      sourcesFailed: 1,
+      chunksCreated: 1,
+      conceptsCreated: 1,
+      pagesCreated: 1
+    });
+    expect(readSources()).toEqual([
+      {
+        adapterId: "fixture",
+        docRef: "bad-fingerprint.md",
+        title: "Bad Fingerprint",
+        fingerprint: "",
+        status: "error"
+      },
+      {
+        adapterId: "fixture",
+        docRef: "good.md",
+        title: "Good",
+        fingerprint: "v1:good.md:Good",
+        status: "ingested"
+      }
+    ]);
+    expect(
+      summary.traceEvents.filter(
+        (event) => event.stage === "chunk" && event.level === "error" && traceDataPhase(event.data) === "fingerprint"
+      )
+    ).toHaveLength(1);
+  });
+
   function readTableCounts(): TableCounts {
     return {
       sources: countRows("sources"),
@@ -997,5 +1283,11 @@ function traceDataSourceId(data: unknown): string | undefined {
 function traceDataSlug(data: unknown): string | undefined {
   return typeof data === "object" && data !== null && "slug" in data
     ? String((data as { slug: unknown }).slug)
+    : undefined;
+}
+
+function traceDataPhase(data: unknown): string | undefined {
+  return typeof data === "object" && data !== null && "phase" in data
+    ? String((data as { phase: unknown }).phase)
     : undefined;
 }

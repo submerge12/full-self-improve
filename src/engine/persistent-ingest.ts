@@ -18,6 +18,7 @@ export interface PersistentMockIngestSummary {
   sourcesSeen: number;
   sourcesProcessed: number;
   sourcesSkipped: number;
+  sourcesFailed: number;
   chunksCreated: number;
   conceptsCreated: number;
   pagesCreated: number;
@@ -30,20 +31,29 @@ export async function runPersistentMockIngest(
   options: MockIngestOptions = {}
 ): Promise<PersistentMockIngestSummary> {
   const preflight = await preflightSources(db, adapter);
-  const ingestAdapter = new PreflightSourceAdapter(adapter, preflight.refsForProcessing);
-  const mockResult = await runMockIngest(ingestAdapter, options);
-  const skippedDocuments = preflight.refsForProcessing.length > 0
-    ? await readSkippedDocuments(adapter, preflight.skippedUnchangedSources)
-    : new Map<string, RawDoc>();
   const fallbackTraceEvents: TraceEvent[] = [];
+  const runId = options.runId ?? `mock-ingest-${slugify(adapter.id)}`;
   const context: PersistenceContext = {
-    runId: mockResult.runId,
+    runId,
     trace: options.trace,
     fallbackTraceEvents
   };
+  const processingRead = await readProcessingDocuments(adapter, preflight.refsForProcessing);
+  const skippedRead = await readSkippedDocuments(adapter, preflight.skippedUnchangedSources);
+  const sourceFailures = [...preflight.failedSources, ...processingRead.failedSources, ...skippedRead.failedSources];
+  recordSourceFailureTraces(sourceFailures, context);
+  const ingestAdapter = new PreflightSourceAdapter(adapter, processingRead.documents, preflight.fingerprintsByDocRef);
+  const mockResult = await runMockIngest(ingestAdapter, { ...options, runId });
 
-  const counts = persistMockResult(db, mockResult, ingestAdapter.getProcessedDocuments(), skippedDocuments, context);
-  recordPreflightSkippedSources(preflight.skippedUnchangedSources, context);
+  const counts = persistMockResult(
+    db,
+    mockResult,
+    ingestAdapter.getProcessedDocuments(),
+    skippedRead.documents,
+    sourceFailures,
+    context
+  );
+  recordPreflightSkippedSources(skippedRead.succeededSources, context);
   const traceEvents =
     options.trace?.getEvents({ runId: mockResult.runId }) ?? [...mockResult.traceEvents, ...fallbackTraceEvents];
 
@@ -51,7 +61,8 @@ export async function runPersistentMockIngest(
     runId: mockResult.runId,
     sourcesSeen: preflight.sourcesSeen,
     sourcesProcessed: counts.sourcesProcessed,
-    sourcesSkipped: counts.sourcesSkipped + preflight.skippedUnchangedSources.length,
+    sourcesSkipped: counts.sourcesSkipped + skippedRead.succeededSources.length,
+    sourcesFailed: sourceFailures.length,
     chunksCreated: counts.chunksCreated,
     conceptsCreated: counts.conceptsCreated,
     pagesCreated: counts.pagesCreated,
@@ -76,6 +87,7 @@ interface PersistenceContext {
 interface SourceRow {
   id: number;
   fingerprint: string;
+  status: string;
 }
 
 interface IdRow {
@@ -122,10 +134,36 @@ interface PreflightSkippedSource {
   fingerprint: string;
 }
 
+interface PreflightProcessableSource {
+  ref: DocRef;
+  fingerprint: string;
+}
+
+interface SourceFailure {
+  adapterId: string;
+  ref: DocRef;
+  fingerprint?: string;
+  reason: string;
+  phase: "fingerprint" | "read";
+}
+
 interface PreflightResult {
   sourcesSeen: number;
-  refsForProcessing: DocRef[];
+  refsForProcessing: PreflightProcessableSource[];
   skippedUnchangedSources: PreflightSkippedSource[];
+  failedSources: SourceFailure[];
+  fingerprintsByDocRef: ReadonlyMap<string, string>;
+}
+
+interface ProcessingReadResult {
+  documents: Map<string, RawDoc>;
+  failedSources: SourceFailure[];
+}
+
+interface SkippedReadResult {
+  documents: Map<string, RawDoc>;
+  succeededSources: PreflightSkippedSource[];
+  failedSources: SourceFailure[];
 }
 
 class PreflightSourceAdapter implements SourceAdapter {
@@ -134,26 +172,36 @@ class PreflightSourceAdapter implements SourceAdapter {
 
   constructor(
     private readonly adapter: SourceAdapter,
-    private readonly refs: readonly DocRef[]
+    private readonly documents: ReadonlyMap<string, RawDoc>,
+    private readonly fingerprintsByDocRef: ReadonlyMap<string, string>
   ) {
     this.id = adapter.id;
     this.kind = adapter.kind;
   }
 
   async *listDocuments(): AsyncIterable<DocRef> {
-    for (const ref of this.refs) {
-      yield ref;
+    for (const rawDoc of this.documents.values()) {
+      yield rawDoc.ref;
     }
   }
 
   async readDocument(ref: DocRef): Promise<RawDoc> {
-    const rawDoc = await this.adapter.readDocument(ref);
+    const rawDoc = this.documents.get(ref.path);
+    if (rawDoc === undefined) {
+      throw new Error(`Missing preflight document: ${ref.path}`);
+    }
+
     this.processedDocuments.set(rawDoc.ref.id, rawDoc);
     return rawDoc;
   }
 
   fingerprint(ref: DocRef): string {
-    return this.adapter.fingerprint(ref);
+    const fingerprint = this.fingerprintsByDocRef.get(ref.path);
+    if (fingerprint === undefined) {
+      throw new Error(`Missing preflight fingerprint: ${ref.path}`);
+    }
+
+    return fingerprint;
   }
 
   getProcessedDocuments(): ReadonlyMap<string, RawDoc> {
@@ -165,32 +213,74 @@ class PreflightSourceAdapter implements SourceAdapter {
 
 async function preflightSources(db: Database.Database, adapter: SourceAdapter): Promise<PreflightResult> {
   const statements = preparePreflightStatements(db);
-  const refsForProcessing: DocRef[] = [];
+  const refsForProcessing: PreflightProcessableSource[] = [];
   const skippedUnchangedSources: PreflightSkippedSource[] = [];
+  const failedSources: SourceFailure[] = [];
+  const fingerprintsByDocRef = new Map<string, string>();
   let sourcesSeen = 0;
 
   for await (const ref of adapter.listDocuments()) {
     sourcesSeen += 1;
-    const fingerprint = adapter.fingerprint(ref);
+    let fingerprint: string;
+    try {
+      fingerprint = adapter.fingerprint(ref);
+    } catch (error) {
+      const existing = statements.selectSource.get(adapter.id, ref.path) as SourceRow | undefined;
+      failedSources.push({
+        adapterId: adapter.id,
+        ref,
+        fingerprint: existing?.fingerprint,
+        reason: reasonFromError(error),
+        phase: "fingerprint"
+      });
+      continue;
+    }
+
+    fingerprintsByDocRef.set(ref.path, fingerprint);
     const existing = statements.selectSource.get(adapter.id, ref.path) as SourceRow | undefined;
-    if (existing !== undefined && existing.fingerprint === fingerprint) {
+    if (existing !== undefined && existing.status !== "error" && existing.fingerprint === fingerprint) {
       skippedUnchangedSources.push({ adapterId: adapter.id, ref, fingerprint });
     } else {
-      refsForProcessing.push(ref);
+      refsForProcessing.push({ ref, fingerprint });
     }
   }
 
-  return { sourcesSeen, refsForProcessing, skippedUnchangedSources };
+  return { sourcesSeen, refsForProcessing, skippedUnchangedSources, failedSources, fingerprintsByDocRef };
 }
 
 function preparePreflightStatements(db: Database.Database) {
   return {
     selectSource: db.prepare(
-      `SELECT id, fingerprint
+      `SELECT id, fingerprint, status
        FROM sources
        WHERE adapter_id = ? AND doc_ref = ?`
     )
   };
+}
+
+async function readProcessingDocuments(
+  adapter: SourceAdapter,
+  sources: readonly PreflightProcessableSource[]
+): Promise<ProcessingReadResult> {
+  const documents = new Map<string, RawDoc>();
+  const failedSources: SourceFailure[] = [];
+
+  for (const source of sources) {
+    try {
+      const rawDoc = await adapter.readDocument(source.ref);
+      documents.set(rawDoc.ref.path, rawDoc);
+    } catch (error) {
+      failedSources.push({
+        adapterId: adapter.id,
+        ref: source.ref,
+        fingerprint: source.fingerprint,
+        reason: reasonFromError(error),
+        phase: "read"
+      });
+    }
+  }
+
+  return { documents, failedSources };
 }
 
 function recordPreflightSkippedSources(sources: PreflightSkippedSource[], context: PersistenceContext): void {
@@ -207,13 +297,26 @@ function recordPreflightSkippedSources(sources: PreflightSkippedSource[], contex
 async function readSkippedDocuments(
   adapter: SourceAdapter,
   sources: readonly PreflightSkippedSource[]
-): Promise<Map<string, RawDoc>> {
+): Promise<SkippedReadResult> {
   const docs = new Map<string, RawDoc>();
+  const succeededSources: PreflightSkippedSource[] = [];
+  const failedSources: SourceFailure[] = [];
   for (const source of sources) {
-    docs.set(source.ref.path, await adapter.readDocument(source.ref));
+    try {
+      docs.set(source.ref.path, await adapter.readDocument(source.ref));
+      succeededSources.push(source);
+    } catch (error) {
+      failedSources.push({
+        adapterId: adapter.id,
+        ref: source.ref,
+        fingerprint: source.fingerprint,
+        reason: reasonFromError(error),
+        phase: "read"
+      });
+    }
   }
 
-  return docs;
+  return { documents: docs, succeededSources, failedSources };
 }
 
 function persistMockResult(
@@ -221,11 +324,13 @@ function persistMockResult(
   result: MockIngestResult,
   processedDocuments: ReadonlyMap<string, RawDoc>,
   skippedDocuments: ReadonlyMap<string, RawDoc>,
+  sourceFailures: readonly SourceFailure[],
   context: PersistenceContext
 ): PersistenceCounts {
   const statements = prepareStatements(db);
   const persist = db.transaction(() => {
     const state = createPersistenceState(processedDocuments, skippedDocuments);
+    persistSourceFailures(sourceFailures, statements);
     persistSources(result, statements, state, context);
     persistConcepts(result.concepts, statements, state);
     reconcileOldAffectedConcepts(statements, state);
@@ -244,7 +349,7 @@ function persistMockResult(
 function prepareStatements(db: Database.Database) {
   return {
     selectSource: db.prepare(
-      `SELECT id, fingerprint
+      `SELECT id, fingerprint, status
        FROM sources
        WHERE adapter_id = ? AND doc_ref = ?`
     ),
@@ -255,6 +360,15 @@ function prepareStatements(db: Database.Database) {
     updateSource: db.prepare(
       `UPDATE sources
        SET title = ?, fingerprint = ?, status = 'ingested', ingested_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ),
+    insertSourceError: db.prepare(
+      `INSERT INTO sources (adapter_id, doc_ref, title, fingerprint, status)
+       VALUES (?, ?, ?, ?, 'error')`
+    ),
+    updateSourceError: db.prepare(
+      `UPDATE sources
+       SET title = ?, fingerprint = ?, status = 'error', ingested_at = CURRENT_TIMESTAMP
        WHERE id = ?`
     ),
     insertChunk: db.prepare(
@@ -343,6 +457,38 @@ function prepareStatements(db: Database.Database) {
 
 type Statements = ReturnType<typeof prepareStatements>;
 
+function persistSourceFailures(failures: readonly SourceFailure[], statements: Statements): void {
+  for (const failure of failures) {
+    const existing = statements.selectSource.get(failure.adapterId, failure.ref.path) as SourceRow | undefined;
+    const fingerprint = failure.fingerprint ?? existing?.fingerprint ?? "";
+    if (existing === undefined) {
+      statements.insertSourceError.run(failure.adapterId, failure.ref.path, failure.ref.title, fingerprint);
+    } else {
+      statements.updateSourceError.run(failure.ref.title, fingerprint, existing.id);
+    }
+  }
+}
+
+function recordSourceFailureTraces(
+  failures: readonly SourceFailure[],
+  context: PersistenceContext
+): void {
+  if (failures.length === 0) {
+    return;
+  }
+
+  for (const failure of failures) {
+    recordPersistentTrace(context, "chunk", "error", "Source failed during persistent ingest.", {
+      outcome: "source_error",
+      adapterId: failure.adapterId,
+      docRef: failure.ref.path,
+      fingerprint: failure.fingerprint,
+      reason: failure.reason,
+      phase: failure.phase
+    });
+  }
+}
+
 interface PersistenceState {
   sourceDbIds: Map<string, number>;
   chunkDbIds: Map<string, number>;
@@ -400,7 +546,7 @@ function persistSources(
     }
 
     state.sourceDbIds.set(source.id, existing.id);
-    if (existing.fingerprint === source.fingerprint) {
+    if (existing.status !== "error" && existing.fingerprint === source.fingerprint) {
       state.counts.sourcesSkipped += 1;
       mapExistingChunks(source.id, result.chunks, existing.id, statements, state);
       recordPersistentTrace(context, "chunk", "info", "Skipped unchanged source.", {
@@ -960,6 +1106,18 @@ function recordPersistentTrace(
     ...eventInput,
     timestamp: "1970-01-01T00:00:00.000Z"
   });
+}
+
+function reasonFromError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message.length > 0 ? error.message : error.name;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return "Unknown source adapter error.";
 }
 
 function toNumberId(id: number | bigint): number {

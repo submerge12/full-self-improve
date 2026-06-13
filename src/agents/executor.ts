@@ -4,6 +4,7 @@ import type {
   AgentEndpointPlan,
   AgentIntendedAction
 } from "./dry-run.js";
+import { redactEndpointReference, redactText } from "./http-clients.js";
 
 export type AgentExecutionMode = "dry-run" | "live";
 export type AgentExecutionStatus = "planned" | "completed" | "blocked";
@@ -96,7 +97,8 @@ export function createAgentBlockerAction(
   endpoint: AgentEndpointPlan,
   error: unknown
 ): AgentIntendedAction {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = redactText(error instanceof Error ? error.message : String(error));
+  const sourceEndpoint = redactEndpointReference(`${endpoint.method} ${endpoint.url}`);
 
   return {
     target: "multica",
@@ -104,12 +106,12 @@ export function createAgentBlockerAction(
     title: `Agent blocked for ${plan.date}`,
     body: [
       `Dry-run board target: ${plan.multicaBoard}.`,
-      `Failed read: ${endpoint.method} ${endpoint.url}`,
+      `Failed read: ${sourceEndpoint}`,
       `Reason: ${message}`,
       "The agent stopped before publishing normal actions."
     ].join("\n"),
     checklist: ["Inspect source endpoint", "Restore the source system", "Rerun the agent after the blocker is resolved"],
-    sourceEndpoints: [`${endpoint.method} ${endpoint.url}`]
+    sourceEndpoints: [sourceEndpoint]
   };
 }
 

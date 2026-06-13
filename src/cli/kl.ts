@@ -5,7 +5,9 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 
 import {
+  createAgentDayDryRunPlan,
   createAgentDryRunPlan,
+  type AgentDayDryRunPlan,
   parseAgentPhase,
   parseAgentRole,
   type AgentDryRunPlan
@@ -131,6 +133,14 @@ export interface KlAgentDryRunCommandResult {
 
 export type KlAgentCommandResult = KlAgentDryRunCommandResult;
 
+export interface KlAgentDayDryRunCommandResult {
+  command: "agent-day";
+  mode: "dry-run";
+  result: AgentDayDryRunPlan;
+}
+
+export type KlAgentDayCommandResult = KlAgentDayDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -138,7 +148,8 @@ export type KlCommandResult =
   | KlTeachbackCommandResult
   | KlDiagnoseCommandResult
   | KlTraceCommandResult
-  | KlAgentCommandResult;
+  | KlAgentCommandResult
+  | KlAgentDayCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -175,8 +186,12 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
     return runAgentCommand(args);
   }
 
+  if (command === "agent-day") {
+    return runAgentDayCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day.`
   );
 }
 
@@ -410,6 +425,32 @@ function runAgentCommand(args: readonly string[]): KlAgentCommandResult {
   };
 }
 
+function runAgentDayCommand(args: readonly string[]): KlAgentDayCommandResult {
+  const { dryRun, options } = parseAgentDayOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-day currently supports only --dry-run.");
+  }
+
+  const date = requireOne(options, "--date", "agent-day");
+  const knowledgeLoopBaseUrl = optionalOne(options, "--knowledge-loop-url", "agent-day");
+  const compassHealthBaseUrl = optionalOne(options, "--compass-health-url", "agent-day");
+  const adapterId = optionalOne(options, "--adapter", "agent-day");
+  const multicaBoard = optionalOne(options, "--board", "agent-day");
+  const result = createAgentDayDryRunPlan({
+    date,
+    ...(knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl }),
+    ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
+    ...(adapterId === undefined ? {} : { adapterId }),
+    ...(multicaBoard === undefined ? {} : { multicaBoard })
+  });
+
+  return {
+    command: "agent-day",
+    mode: "dry-run",
+    result
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -439,15 +480,26 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
 }
 
 function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
-  const allowed = new Set([
-    "--role",
-    "--phase",
-    "--date",
-    "--knowledge-loop-url",
-    "--compass-health-url",
-    "--adapter",
-    "--board"
-  ]);
+  return parseFlaggedOptions(
+    args,
+    new Set(["--role", "--phase", "--date", "--knowledge-loop-url", "--compass-health-url", "--adapter", "--board"]),
+    "agent"
+  );
+}
+
+function parseAgentDayOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(
+    args,
+    new Set(["--date", "--knowledge-loop-url", "--compass-health-url", "--adapter", "--board"]),
+    "agent-day"
+  );
+}
+
+function parseFlaggedOptions(
+  args: readonly string[],
+  allowed: Set<string>,
+  command: string
+): { dryRun: boolean; options: Map<string, string[]> } {
   const options = new Map<string, string[]>();
   let dryRun = false;
 
@@ -461,15 +513,15 @@ function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options:
     }
 
     if (name === undefined || !name.startsWith("--")) {
-      throw new UsageError(`Unexpected positional argument for agent: ${name ?? ""}`);
+      throw new UsageError(`Unexpected positional argument for ${command}: ${name ?? ""}`);
     }
 
     if (!allowed.has(name)) {
-      throw new UsageError(`Unknown option for agent: ${name}`);
+      throw new UsageError(`Unknown option for ${command}: ${name}`);
     }
 
     if (value === undefined || value.startsWith("--")) {
-      throw new UsageError(`Option ${name} for agent requires a value.`);
+      throw new UsageError(`Option ${name} for ${command} requires a value.`);
     }
 
     const values = options.get(name) ?? [];

@@ -12,6 +12,7 @@ import { persistTraceEvent } from "../db/trace-store.js";
 import type { TraceEvent } from "../engine/trace.js";
 import {
   handleKlCommand,
+  type KlAgentDayDryRunCommandResult,
   type KlAgentDryRunCommandResult,
   type KlCommandResult,
   type KlPersistentQuizCommandResult,
@@ -394,7 +395,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day/
     );
   });
 
@@ -491,6 +492,64 @@ describe("kl CLI handler", () => {
     await expect(
       handleKlCommand(["agent", "--dry-run", "--role", "nutritionist", "--date", "2026-06-13", "--bogus", "1"])
     ).rejects.toThrow(/Unknown option for agent: --bogus/);
+  });
+
+  test("agent-day dry-run prints the M2 board-day sequence", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "agent-day",
+        "--dry-run",
+        "--date",
+        "2026-06-13",
+        "--knowledge-loop-url",
+        "http://127.0.0.1:3124",
+        "--compass-health-url",
+        "http://compass.local/",
+        "--board",
+        "Holly Daily"
+      ],
+      { stdout: stdout.sink }
+    )) as KlAgentDayDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-day",
+      mode: "dry-run",
+      result: {
+        mode: "dry-run",
+        date: "2026-06-13",
+        multicaBoard: "Holly Daily",
+        externalWrites: []
+      }
+    });
+    expect(result.result.sequence.map((entry) => `${entry.role}:${entry.phase}`)).toEqual([
+      "librarian:nightly-ingest",
+      "scholar:morning-plan",
+      "nutritionist:daily-meals",
+      "scholar:evening-mastery"
+    ]);
+    expect(result.result.intendedActions.map((action) => action.title)).toEqual([
+      "Librarian ingest report for 2026-06-13",
+      "Scholar study plan for 2026-06-13",
+      "Nutrition plan for 2026-06-13",
+      "Scholar mastery report for 2026-06-13"
+    ]);
+  });
+
+  test("agent-day command validates dry-run and options", async () => {
+    await expect(handleKlCommand(["agent-day", "--date", "2026-06-13"])).rejects.toThrow(
+      /supports only --dry-run/
+    );
+    await expect(handleKlCommand(["agent-day", "--dry-run", "--date", "2026-02-31"])).rejects.toThrow(
+      /Invalid agent date/
+    );
+    await expect(
+      handleKlCommand(["agent-day", "--dry-run", "--date", "2026-06-13", "--date", "2026-06-14"])
+    ).rejects.toThrow(/requires exactly one --date/);
+    await expect(handleKlCommand(["agent-day", "--dry-run", "--bogus", "1", "--date", "2026-06-13"])).rejects.toThrow(
+      /Unknown option for agent-day: --bogus/
+    );
   });
 
   test("with API key env vars deleted, CLI mock persistent flow runs ingest, plan, quiz, teachback, diagnose, and trace against one DB", async () => {

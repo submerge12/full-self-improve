@@ -16,6 +16,14 @@ export interface AgentDryRunInput {
   readonly multicaBoard?: string;
 }
 
+export interface AgentDayDryRunInput {
+  readonly date: string;
+  readonly knowledgeLoopBaseUrl?: string;
+  readonly compassHealthBaseUrl?: string;
+  readonly adapterId?: string;
+  readonly multicaBoard?: string;
+}
+
 export interface AgentEndpointPlan {
   readonly method: "GET" | "POST";
   readonly url: string;
@@ -37,6 +45,20 @@ export interface AgentDryRunPlan {
   readonly phase: AgentPhase;
   readonly date: string;
   readonly multicaBoard: string;
+  readonly externalReads: readonly AgentEndpointPlan[];
+  readonly externalWrites: readonly [];
+  readonly intendedActions: readonly AgentIntendedAction[];
+  readonly llmCost: {
+    readonly estimatedUsd: number;
+    readonly source: "dry-run-no-llm";
+  };
+}
+
+export interface AgentDayDryRunPlan {
+  readonly mode: "dry-run";
+  readonly date: string;
+  readonly multicaBoard: string;
+  readonly sequence: readonly AgentDryRunPlan[];
   readonly externalReads: readonly AgentEndpointPlan[];
   readonly externalWrites: readonly [];
   readonly intendedActions: readonly AgentIntendedAction[];
@@ -73,6 +95,38 @@ export function createAgentDryRunPlan(input: AgentDryRunInput): AgentDryRunPlan 
     intendedActions: intendedActionsFor(input, phase, multicaBoard),
     llmCost: {
       estimatedUsd: 0,
+      source: "dry-run-no-llm"
+    }
+  };
+}
+
+export function createAgentDayDryRunPlan(input: AgentDayDryRunInput): AgentDayDryRunPlan {
+  assertDate(input.date);
+  const multicaBoard = input.multicaBoard ?? DEFAULT_MULTICA_BOARD;
+  const baseInput = {
+    date: input.date,
+    ...(input.knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl: input.knowledgeLoopBaseUrl }),
+    ...(input.compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl: input.compassHealthBaseUrl }),
+    ...(input.adapterId === undefined ? {} : { adapterId: input.adapterId }),
+    multicaBoard
+  };
+  const sequence = [
+    createAgentDryRunPlan({ ...baseInput, role: "librarian", phase: "nightly-ingest" }),
+    createAgentDryRunPlan({ ...baseInput, role: "scholar", phase: "morning-plan" }),
+    createAgentDryRunPlan({ ...baseInput, role: "nutritionist", phase: "daily-meals" }),
+    createAgentDryRunPlan({ ...baseInput, role: "scholar", phase: "evening-mastery" })
+  ];
+
+  return {
+    mode: "dry-run",
+    date: input.date,
+    multicaBoard,
+    sequence,
+    externalReads: sequence.flatMap((plan) => plan.externalReads),
+    externalWrites: [],
+    intendedActions: sequence.flatMap((plan) => plan.intendedActions),
+    llmCost: {
+      estimatedUsd: sequence.reduce((total, plan) => total + plan.llmCost.estimatedUsd, 0),
       source: "dry-run-no-llm"
     }
   };

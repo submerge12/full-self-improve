@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { createAgentDryRunPlan, parseAgentPhase, parseAgentRole } from "./dry-run.js";
+import { createAgentDayDryRunPlan, createAgentDryRunPlan, parseAgentPhase, parseAgentRole } from "./dry-run.js";
 
 describe("agent dry-run profiles", () => {
   test("Librarian dry-run plans the ingest report without external writes", () => {
@@ -108,5 +108,40 @@ describe("agent dry-run profiles", () => {
     expect(() => createAgentDryRunPlan({ role: "scholar", phase: "morning-plan", date: "2026-02-31" })).toThrow(
       /Invalid agent date/
     );
+  });
+
+  test("day dry-run sequences the M2 board-day roles without external writes", () => {
+    const plan = createAgentDayDryRunPlan({
+      date: "2026-06-13",
+      knowledgeLoopBaseUrl: "http://127.0.0.1:3124",
+      compassHealthBaseUrl: "http://compass.local",
+      multicaBoard: "Holly Daily"
+    });
+
+    expect(plan).toMatchObject({
+      mode: "dry-run",
+      date: "2026-06-13",
+      multicaBoard: "Holly Daily",
+      externalWrites: [],
+      llmCost: { estimatedUsd: 0, source: "dry-run-no-llm" }
+    });
+    expect(plan.sequence.map((entry) => `${entry.role}:${entry.phase}`)).toEqual([
+      "librarian:nightly-ingest",
+      "scholar:morning-plan",
+      "nutritionist:daily-meals",
+      "scholar:evening-mastery"
+    ]);
+    expect(plan.externalReads.map((read) => `${read.method} ${read.url}`)).toEqual([
+      "POST http://127.0.0.1:3124/api/ingest/run?adapter=holly-vault",
+      "GET http://127.0.0.1:3124/api/plan/today",
+      "GET http://compass.local/api/meal-plan/today?date=2026-06-13",
+      "GET http://127.0.0.1:3124/api/mastery/summary"
+    ]);
+    expect(plan.intendedActions.map((action) => action.title)).toEqual([
+      "Librarian ingest report for 2026-06-13",
+      "Scholar study plan for 2026-06-13",
+      "Nutrition plan for 2026-06-13",
+      "Scholar mastery report for 2026-06-13"
+    ]);
   });
 });

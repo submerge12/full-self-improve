@@ -8,7 +8,7 @@
   },
   "scripts": {
     "kl": "tsx src/cli/kl.ts",
-    "dev": "next dev",
+    "dev": "next dev --webpack",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test:unit": "vitest run",

@@ -3,17 +3,18 @@ import { getRuntimePublicWikiPageDetail } from "../../../_shared/page-data.js";
 export const dynamic = "force-dynamic";
 
 interface PublicWikiDetailPageProps {
-  readonly params: Promise<{ readonly pageId?: string }> | { readonly pageId?: string };
+  readonly params?: Promise<{ readonly pageId?: string | string[] }>;
 }
 
 export default async function PublicWikiDetailPage({ params }: PublicWikiDetailPageProps) {
-  const { pageId } = await Promise.resolve(params);
+  const { pageId } = params === undefined ? {} : await params;
+  const normalizedPageId = Array.isArray(pageId) ? pageId[0] : pageId;
 
-  if (pageId === undefined) {
+  if (normalizedPageId === undefined) {
     return throwNextNotFound();
   }
 
-  const page = getRuntimePublicWikiPageDetail(pageId);
+  const page = getRuntimePublicWikiPageDetail(normalizedPageId);
 
   if (page === null) {
     return throwNextNotFound();

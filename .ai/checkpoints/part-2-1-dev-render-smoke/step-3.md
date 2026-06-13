@@ -1,0 +1,29 @@
+# Part 2.1 Dev Render Smoke Step 3 - Verification
+
+- Build verification:
+  - `npx next build --webpack` passed.
+  - Routes shown by Next: `/`, `/learn`, `/wiki`, `/wiki/[pageId]`, and all existing API routes.
+- Static and test verification:
+  - `npm run typecheck` passed.
+  - `npm run lint` passed.
+  - `npm run test:unit` passed: 23 files, 267 tests.
+  - `npm run check` passed outside the Windows sandbox: typecheck + lint + 23 files / 267 tests.
+  - `npm audit --audit-level=moderate` reported 0 vulnerabilities.
+  - `git diff --check` exited 0 with only CRLF normalization warnings.
+- Runtime data verification:
+  - `npx tsx -e "..."` read the smoke DB through `getRuntimeLearningDashboardData`, `getRuntimePublicWikiPageSummaries`, and `getRuntimePublicWikiPageDetail`.
+  - Data read completed successfully: learning plan returned `planned`, public wiki listed only `Public Smoke Concept`, `/wiki/1` detail included the cited chunk, and private page id `2` returned `null`.
+- Dev server verification:
+  - Started with `KNOWLEDGE_LOOP_DB_PATH=.ai/tmp/part-2-1-dev-render-smoke/smoke.db npm run dev -- --hostname 127.0.0.1 --port 3110` outside the Windows sandbox because sandboxed Next CLI fork fails with `spawn EPERM`.
+  - `next dev --webpack` reported `Ready in 711ms` and listened on `127.0.0.1:3110`.
+  - HTML smoke checks passed:
+    - `/` HTTP 200 contained `Knowledge Loop`, `Open learning dashboard`, and `Browse public wiki`.
+    - `/learn` HTTP 200 contained `Knowledge Loop learning`, `Status:`, `planned`, `Public Smoke Concept`, `score`, `42%`, `confidence`, and `70%`.
+    - `/wiki` HTTP 200 contained `Public wiki`, `Public Smoke Concept`, `Version`, and `1`; it did not contain `Private Smoke Concept`.
+    - `/wiki/1` HTTP 200 contained `Public Smoke Concept`, `Version`, `1`, `Provenance`, `Public Smoke Source`, `public-smoke.md`, `smoke-vault`, and `Public smoke source chunk for provenance.`; it did not contain `Private Smoke Concept`.
+    - `/wiki/2` HTTP 404 contained `404` and did not contain `Private Smoke Concept`.
+- The dev server was stopped after smoke verification.
+- Final verification repeated the same HTML smoke on port `3111` after `agentRules: false` and `.ai/tmp/**` lint ignore were added; all checks passed again.
+- Spec reviewer verdict: APPROVE, no critical or important findings.
+- Quality/process reviewer verdict: APPROVE, no critical or important findings; noted `eslint.config.mjs` as an intentional scoped change.
+- Did not bulk-delete files or directories.

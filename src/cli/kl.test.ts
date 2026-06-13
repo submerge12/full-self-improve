@@ -17,6 +17,7 @@ import {
   type KlAgentBoardEvidenceDryRunCommandResult,
   type KlAgentBoardConfigDryRunCommandResult,
   type KlAgentDryRunCommandResult,
+  type KlAgentFailureSmokeDryRunCommandResult,
   type KlAgentLiveSmokeDryRunCommandResult,
   type KlAgentPreflightDryRunCommandResult,
   type KlAgentScheduleDryRunCommandResult,
@@ -416,7 +417,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
   });
 
@@ -807,6 +808,117 @@ describe("kl CLI handler", () => {
         "07:30"
       ])
     ).rejects.toThrow(/Invalid agent schedule timezone/);
+  });
+
+  test("agent-failure-smoke dry-run simulates a visible blocker without fetching", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      ["agent-failure-smoke", "--dry-run", "--date", "2026-06-13"],
+      {
+        stdout: stdout.sink,
+        async fetch() {
+          throw new Error("failure smoke dry-run must not fetch");
+        },
+        env: {
+          KL_AGENT_READ_BEARER_TOKEN: "read-secret",
+          KL_MULTICA_BEARER_TOKEN: "board-secret"
+        }
+      }
+    )) as KlAgentFailureSmokeDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-failure-smoke",
+      mode: "dry-run",
+      result: {
+        mode: "offline-failure-smoke",
+        date: "2026-06-13",
+        status: "blocked",
+        blockerPublished: true,
+        failedEndpoint: {
+          role: "scholar",
+          phase: "morning-plan",
+          method: "GET",
+          url: "http://127.0.0.1:3000/api/plan/today"
+        },
+        totals: {
+          reads: 3,
+          publishedActions: 4,
+          blockers: 1,
+          publishFailures: 0
+        },
+        nonCompletionNotice:
+          "This offline failure smoke does not kill real API services. It does not call Multica. It does not prove live blocker behavior. It does not close M2."
+      }
+    });
+    expect(result.result.dayRunReport.entries.map((entry) => `${entry.role}:${entry.phase}:${entry.status}`)).toEqual([
+      "librarian:nightly-ingest:completed",
+      "scholar:morning-plan:blocked",
+      "nutritionist:daily-meals:completed",
+      "scholar:evening-mastery:completed"
+    ]);
+    expect(result.result.blockerTitle).toBe("Agent blocked for 2026-06-13");
+    expect(result.result.blockerSourceEndpoints).toEqual(["GET http://127.0.0.1:3000/api/plan/today"]);
+    expect(JSON.stringify(result)).not.toContain("read-secret");
+    expect(JSON.stringify(result)).not.toContain("board-secret");
+  });
+
+  test("agent-failure-smoke dry-run accepts a bounded endpoint selector", async () => {
+    const result = (await handleKlCommand([
+      "agent-failure-smoke",
+      "--dry-run",
+      "--date",
+      "2026-06-13",
+      "--role",
+      "nutritionist",
+      "--phase",
+      "daily-meals",
+      "--method",
+      "GET",
+      "--url-includes",
+      "/api/meal-plan/today"
+    ])) as KlAgentFailureSmokeDryRunCommandResult;
+
+    expect(result.result.failedEndpoint).toMatchObject({
+      role: "nutritionist",
+      phase: "daily-meals",
+      method: "GET",
+      url: "http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13"
+    });
+    expect(result.result.dayRunReport.entries.map((entry) => `${entry.role}:${entry.phase}:${entry.status}`)).toEqual([
+      "librarian:nightly-ingest:completed",
+      "scholar:morning-plan:completed",
+      "nutritionist:daily-meals:blocked",
+      "scholar:evening-mastery:completed"
+    ]);
+  });
+
+  test("agent-failure-smoke command validates mode, selector, and method", async () => {
+    await expect(handleKlCommand(["agent-failure-smoke", "--date", "2026-06-13"])).rejects.toThrow(
+      /supports only --dry-run/
+    );
+    await expect(handleKlCommand(["agent-failure-smoke", "--live", "--date", "2026-06-13"])).rejects.toThrow(
+      /Unknown option for agent-failure-smoke: --live/
+    );
+    await expect(
+      handleKlCommand(["agent-failure-smoke", "--dry-run", "--date", "2026-06-13", "--method", "PATCH"])
+    ).rejects.toThrow(/Expected GET or POST/);
+    await expect(
+      handleKlCommand([
+        "agent-failure-smoke",
+        "--dry-run",
+        "--date",
+        "2026-06-13",
+        "--role",
+        "scholar",
+        "--phase",
+        "morning-plan",
+        "--method",
+        "GET",
+        "--url-includes",
+        "real-secret"
+      ])
+    ).rejects.toThrow("No endpoint matched failure smoke selector.");
   });
 
   test("agent-live-smoke dry-run validates the checked-in manifest without fetching", async () => {

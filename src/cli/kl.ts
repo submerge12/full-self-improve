@@ -16,6 +16,7 @@ import {
   createAgentDayDryRunPlan,
   createAgentDryRunPlan,
   type AgentDayDryRunPlan,
+  type AgentEndpointPlan,
   parseAgentPhase,
   parseAgentRole,
   type AgentDryRunPlan
@@ -40,6 +41,11 @@ import {
   validateBoardDayEvidence,
   type BoardDayEvidenceValidationResult
 } from "../agents/board-day-evidence.js";
+import {
+  createAgentFailureSmokeReport,
+  type AgentFailureSmokeEndpointSelector,
+  type AgentFailureSmokeReport
+} from "../agents/failure-smoke.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -281,6 +287,14 @@ export interface KlAgentBoardEvidenceDryRunCommandResult {
 
 export type KlAgentBoardEvidenceCommandResult = KlAgentBoardEvidenceDryRunCommandResult;
 
+export interface KlAgentFailureSmokeDryRunCommandResult {
+  command: "agent-failure-smoke";
+  mode: "dry-run";
+  result: AgentFailureSmokeReport;
+}
+
+export type KlAgentFailureSmokeCommandResult = KlAgentFailureSmokeDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -294,7 +308,8 @@ export type KlCommandResult =
   | KlAgentLiveSmokeCommandResult
   | KlAgentPreflightCommandResult
   | KlAgentBoardConfigCommandResult
-  | KlAgentBoardEvidenceCommandResult;
+  | KlAgentBoardEvidenceCommandResult
+  | KlAgentFailureSmokeCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -355,8 +370,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentBoardEvidenceCommand(args);
   }
 
+  if (command === "agent-failure-smoke") {
+    return runAgentFailureSmokeCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke.`
   );
 }
 
@@ -870,6 +889,33 @@ function runAgentBoardEvidenceCommand(args: readonly string[]): KlAgentBoardEvid
   };
 }
 
+async function runAgentFailureSmokeCommand(args: readonly string[]): Promise<KlAgentFailureSmokeCommandResult> {
+  const { dryRun, options } = parseAgentFailureSmokeOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-failure-smoke supports only --dry-run.");
+  }
+
+  const config = loadOptionalAgentConfig(options, "agent-failure-smoke");
+  const date = requireOne(options, "--date", "agent-failure-smoke");
+  const plan = createAgentDayDryRunPlan(
+    agentDayInputFromConfig({
+      config,
+      overrides: agentDryRunOverrides(options, "agent-failure-smoke"),
+      date
+    })
+  );
+  const result = await createAgentFailureSmokeReport({
+    plan,
+    failedEndpoint: agentFailureSmokeSelector(options)
+  });
+
+  return {
+    command: "agent-failure-smoke",
+    mode: "dry-run",
+    result
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -996,10 +1042,47 @@ function parseAgentBoardEvidenceOptions(args: readonly string[]): { dryRun: bool
   return parseFlaggedOptions(args, new Set(["--evidence", "--manifest"]), "agent-board-evidence");
 }
 
+function parseAgentFailureSmokeOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(
+    args,
+    new Set([
+      "--role",
+      "--phase",
+      "--method",
+      "--url-includes",
+      "--date",
+      "--knowledge-loop-url",
+      "--compass-health-url",
+      "--adapter",
+      "--board",
+      "--config"
+    ]),
+    "agent-failure-smoke"
+  );
+}
+
 function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {
   const configPath = optionalOne(options, "--config", command);
 
   return configPath === undefined ? undefined : loadAgentRuntimeConfig(configPath);
+}
+
+function agentFailureSmokeSelector(options: Map<string, string[]>): AgentFailureSmokeEndpointSelector | undefined {
+  const roleValue = optionalOne(options, "--role", "agent-failure-smoke");
+  const phaseValue = optionalOne(options, "--phase", "agent-failure-smoke");
+  const methodValue = optionalOne(options, "--method", "agent-failure-smoke");
+  const urlIncludes = optionalOne(options, "--url-includes", "agent-failure-smoke");
+
+  if (roleValue === undefined && phaseValue === undefined && methodValue === undefined && urlIncludes === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...(roleValue === undefined ? {} : { role: parseAgentRole(roleValue) }),
+    ...(phaseValue === undefined ? {} : { phase: parseAgentPhase(phaseValue) }),
+    ...(methodValue === undefined ? {} : { method: parseAgentFailureSmokeMethod(methodValue) }),
+    ...(urlIncludes === undefined ? {} : { urlIncludes })
+  };
 }
 
 function loadLiveSmokeManifest(manifestPath: string): { manifest: unknown; relativePath: string } {
@@ -1262,6 +1345,14 @@ function parseHttpEndpointOption(value: string, optionName: string): string {
   }
 
   return value;
+}
+
+function parseAgentFailureSmokeMethod(value: string): AgentEndpointPlan["method"] {
+  if (value === "GET" || value === "POST") {
+    return value;
+  }
+
+  throw new UsageError(`Invalid --method value "${value}". Expected GET or POST.`);
 }
 
 function parseTraceRunId(value: string): string {

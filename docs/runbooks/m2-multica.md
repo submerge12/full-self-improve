@@ -134,6 +134,19 @@ The report embeds the scheduler dry-run output, the live-smoke manifest validati
 
 `ready_for_live_smoke` means only that the offline scheduler intent and manifest contract are internally aligned for the selected board date. It does not execute Multica, prove live board posting, prove two consecutive hands-free days, verify failure blockers, verify evening mastery deltas, surface live daily cost, or close M2.
 
+## Offline Failure-Blocker Smoke
+
+Before the real failure drill, run an offline smoke that simulates one source endpoint failure with in-memory clients:
+
+```powershell
+npm run kl -- agent-failure-smoke --dry-run `
+  --date 2026-06-14
+```
+
+By default, this fails the Scholar morning-plan read for `/api/plan/today`, verifies the day runner publishes a blocker action, and confirms later independent agents still run. To target a different planned read, pass `--role`, `--phase`, `--method`, and `--url-includes`.
+
+This command must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not kill a real service, must not publish board items, must not touch the Multica or pi-harness checkouts, and must not accept `--live`. A passing result is only an offline simulation of the blocker path; it does not prove the required live kill-API drill, live board blocker visibility, or M2 completion.
+
 ## Offline Board-Day Evidence Validation
 
 After real board observations are captured, validate the evidence file against the live-smoke manifest:

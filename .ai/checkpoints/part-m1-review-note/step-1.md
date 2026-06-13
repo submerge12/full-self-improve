@@ -1,0 +1,25 @@
+# Part M1 Review Note Step 1
+
+- Added `docs/reviews/M1.md` as the milestone review artifact required by `PLAN.md` section 5.
+- The review note does not declare M1 complete.
+- It records verified evidence from existing checkpoints:
+  - no-key `npm run check` proof;
+  - dev render smoke;
+  - Holly real dataset ingest proof;
+  - mock-persistent full CLI flow;
+  - API docs and bearer route smoke;
+  - public wiki privacy/detail behavior.
+- It records deferred work explicitly:
+  - the live one-sitting M1 demo remains undone;
+  - browser-level quiz and teach-back UI interaction remains undone;
+  - real-dataset source failure isolation did not trigger because the current real run had zero source failures.
+- Reviewer follow-up added a checklist reconciliation table for:
+  - Section 0 ground rules;
+  - Section 2.1 stack;
+  - Section 2.2 source adapters;
+  - Section 2.3 data model;
+  - Section 2.4 pipelines;
+  - Section 2.5 API surface.
+- Section 0 frozen-repo `git status` re-verification is explicitly deferred to the live M1 closure gate.
+- No production code changes were made.
+- No bulk-delete commands were used.

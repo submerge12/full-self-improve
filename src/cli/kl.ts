@@ -30,6 +30,11 @@ import {
   type AgentScheduleTiming
 } from "../agents/schedule.js";
 import { validateLiveSmokeManifest, type LiveSmokeManifestValidationResult } from "../agents/live-smoke-manifest.js";
+import {
+  BOARD_PUBLISH_CONFIG_LIVE_CLIENT_WARNING,
+  validateBoardPublishConfig,
+  type BoardPublishConfigValidationResult
+} from "../agents/board-publish-config.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -237,6 +242,21 @@ export interface KlAgentPreflightDryRunCommandResult {
 
 export type KlAgentPreflightCommandResult = KlAgentPreflightDryRunCommandResult;
 
+export interface KlAgentBoardConfigDryRunResult {
+  readonly configPath: string;
+  readonly valid: boolean;
+  readonly validation: BoardPublishConfigValidationResult;
+  readonly nonCompletionNotice: string;
+}
+
+export interface KlAgentBoardConfigDryRunCommandResult {
+  command: "agent-board-config";
+  mode: "dry-run";
+  result: KlAgentBoardConfigDryRunResult;
+}
+
+export type KlAgentBoardConfigCommandResult = KlAgentBoardConfigDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -248,7 +268,8 @@ export type KlCommandResult =
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
   | KlAgentLiveSmokeCommandResult
-  | KlAgentPreflightCommandResult;
+  | KlAgentPreflightCommandResult
+  | KlAgentBoardConfigCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -301,8 +322,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentPreflightCommand(args);
   }
 
+  if (command === "agent-board-config") {
+    return runAgentBoardConfigCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config.`
   );
 }
 
@@ -316,6 +341,8 @@ const DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE =
   "This offline validation does not execute Multica, install a scheduler, prove live board posting, or close M2.";
 const DEFAULT_PREFLIGHT_NON_COMPLETION_NOTICE =
   "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.";
+const DEFAULT_BOARD_CONFIG_NON_COMPLETION_NOTICE =
+  "This board publish config validation is offline-only. It does not call Multica, prove the board contract, prove live posting, or close M2.";
 const M2_REQUIRED_LIVE_PROOFS = [
   {
     id: "multica_self_host_verified",
@@ -593,6 +620,14 @@ async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Pro
   }
 
   const env = io.env ?? process.env;
+  const createTaskEndpointUrl = parseHttpEndpointOption(
+    requireOne(options, "--multica-create-task-url", "agent-day"),
+    "--multica-create-task-url"
+  );
+  const addCommentEndpointUrl = parseHttpEndpointOption(
+    requireOne(options, "--multica-add-comment-url", "agent-day"),
+    "--multica-add-comment-url"
+  );
   const result = await executeAgentDay(plan, "live", {
     readClient: createFetchAgentReadClient({
       fetch: io.fetch ?? globalThis.fetch,
@@ -602,8 +637,8 @@ async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Pro
       fetch: io.fetch ?? globalThis.fetch,
       boardId: plan.multicaBoard,
       bearerToken: optionalEnv(env, "KL_MULTICA_BEARER_TOKEN"),
-      createTaskEndpointUrl: requireOne(options, "--multica-create-task-url", "agent-day"),
-      addCommentEndpointUrl: requireOne(options, "--multica-add-comment-url", "agent-day")
+      createTaskEndpointUrl,
+      addCommentEndpointUrl
     })
   });
 
@@ -735,6 +770,34 @@ function runAgentPreflightCommand(args: readonly string[]): KlAgentPreflightComm
   };
 }
 
+function runAgentBoardConfigCommand(args: readonly string[]): KlAgentBoardConfigCommandResult {
+  const { dryRun, options } = parseAgentBoardConfigOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-board-config supports only --dry-run.");
+  }
+
+  const configPath = requireOne(options, "--config", "agent-board-config");
+  const { value, relativePath, errors } = loadCheckoutJsonForValidation(configPath, "Board publish config");
+  const validation =
+    errors.length === 0
+      ? validateBoardPublishConfig(value)
+      : {
+          errors,
+          warnings: [BOARD_PUBLISH_CONFIG_LIVE_CLIENT_WARNING]
+        };
+
+  return {
+    command: "agent-board-config",
+    mode: "dry-run",
+    result: {
+      configPath: relativePath,
+      valid: validation.errors.length === 0,
+      validation,
+      nonCompletionNotice: DEFAULT_BOARD_CONFIG_NON_COMPLETION_NOTICE
+    }
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -853,6 +916,10 @@ function parseAgentPreflightOptions(args: readonly string[]): { dryRun: boolean;
   );
 }
 
+function parseAgentBoardConfigOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(args, new Set(["--config"]), "agent-board-config");
+}
+
 function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {
   const configPath = optionalOne(options, "--config", command);
 
@@ -860,28 +927,83 @@ function loadOptionalAgentConfig(options: Map<string, string[]>, command: string
 }
 
 function loadLiveSmokeManifest(manifestPath: string): { manifest: unknown; relativePath: string } {
+  const loaded = loadCheckoutJson(manifestPath, "Live smoke manifest");
+
+  return {
+    manifest: loaded.value,
+    relativePath: loaded.relativePath
+  };
+}
+
+function loadCheckoutJson(filePath: string, label: string): { value: unknown; relativePath: string } {
+  const { realPath, relativePath } = resolveCheckoutFile(filePath, label);
+  const sourceText = readFileSync(realPath, "utf8");
+  assertNoDuplicateJsonKeys(sourceText);
+
+  return {
+    value: JSON.parse(sourceText) as unknown,
+    relativePath
+  };
+}
+
+function loadCheckoutJsonForValidation(
+  filePath: string,
+  label: string
+): { value: unknown; relativePath: string; errors: readonly string[] } {
+  const { realPath, relativePath } = resolveCheckoutFile(filePath, label);
+  const sourceText = readFileSync(realPath, "utf8");
+  const errors: string[] = [];
+
+  try {
+    assertNoDuplicateJsonKeys(sourceText);
+  } catch (error) {
+    errors.push(error instanceof Error ? error.message : String(error));
+  }
+
+  if (errors.length > 0) {
+    return {
+      value: undefined,
+      relativePath,
+      errors
+    };
+  }
+
+  try {
+    return {
+      value: JSON.parse(sourceText) as unknown,
+      relativePath,
+      errors
+    };
+  } catch (error) {
+    return {
+      value: undefined,
+      relativePath,
+      errors: [error instanceof Error ? error.message : String(error)]
+    };
+  }
+}
+
+function resolveCheckoutFile(filePath: string, label: string): { realPath: string; relativePath: string } {
   const projectRoot = realpathSync(path.resolve(process.cwd()));
-  const resolvedPath = path.resolve(projectRoot, manifestPath);
+  const resolvedPath = path.resolve(projectRoot, filePath);
   const relative = path.relative(projectRoot, resolvedPath);
 
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("Live smoke manifest path must stay inside the knowledge-loop checkout.");
+    throw new UsageError(`${label} path must stay inside the knowledge-loop checkout.`);
   }
 
   if (!existsSync(resolvedPath)) {
-    throw new Error(`Live smoke manifest path does not exist: ${manifestPath}.`);
+    throw new UsageError(`${label} path does not exist: ${filePath}.`);
   }
 
   const realPath = realpathSync(resolvedPath);
   const realRelative = path.relative(projectRoot, realPath);
   if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
-    throw new Error("Live smoke manifest path must stay inside the knowledge-loop checkout.");
+    throw new UsageError(`${label} path must stay inside the knowledge-loop checkout.`);
   }
 
-  const manifest = JSON.parse(readFileSync(realPath, "utf8")) as unknown;
-
   return {
-    manifest,
+    realPath,
     relativePath: toPosixPath(realRelative)
   };
 }
@@ -1048,6 +1170,24 @@ function parsePositiveSafeInteger(value: string, optionName: string): number {
   return parsed;
 }
 
+function parseHttpEndpointOption(value: string, optionName: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new UsageError(`Invalid ${optionName} value. Expected an http or https URL.`);
+  }
+
+  if (url.username.length > 0 || url.password.length > 0) {
+    throw new UsageError(`Invalid ${optionName} value. Multica board endpoint must not include URL credentials.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new UsageError(`Invalid ${optionName} value. Expected an http or https URL.`);
+  }
+
+  return value;
+}
+
 function parseTraceRunId(value: string): string {
   if (value.trim().length === 0) {
     throw new UsageError("Command trace requires a non-empty --run value.");
@@ -1119,6 +1259,65 @@ function parseConcept(value: string): PlanConceptInput {
     slug,
     name
   };
+}
+
+function assertNoDuplicateJsonKeys(sourceText: string): void {
+  const objectKeys: Array<Set<string>> = [];
+
+  for (let index = 0; index < sourceText.length; index += 1) {
+    const char = sourceText[index];
+    if (char === '"') {
+      const { value, endIndex } = readJsonString(sourceText, index);
+      const nextIndex = skipWhitespace(sourceText, endIndex + 1);
+      if (sourceText[nextIndex] === ":" && objectKeys.length > 0) {
+        const keys = objectKeys[objectKeys.length - 1];
+        if (keys?.has(value)) {
+          throw new Error(`Duplicate JSON key ${value}.`);
+        }
+        keys?.add(value);
+      }
+      index = endIndex;
+      continue;
+    }
+
+    if (char === "{") {
+      objectKeys.push(new Set<string>());
+    } else if (char === "}") {
+      objectKeys.pop();
+    }
+  }
+}
+
+function readJsonString(sourceText: string, startIndex: number): { value: string; endIndex: number } {
+  let escaped = false;
+  for (let index = startIndex + 1; index < sourceText.length; index += 1) {
+    const char = sourceText[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === '"') {
+      return {
+        value: JSON.parse(sourceText.slice(startIndex, index + 1)) as string,
+        endIndex: index
+      };
+    }
+  }
+
+  throw new Error("JSON file contains an unterminated string.");
+}
+
+function skipWhitespace(sourceText: string, startIndex: number): number {
+  let index = startIndex;
+  while (/\s/u.test(sourceText[index] ?? "")) {
+    index += 1;
+  }
+
+  return index;
 }
 
 function toPosixPath(value: string): string {

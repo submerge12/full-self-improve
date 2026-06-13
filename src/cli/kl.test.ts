@@ -14,6 +14,7 @@ import {
   handleKlCommand,
   type KlAgentDayDryRunCommandResult,
   type KlAgentDayLiveCommandResult,
+  type KlAgentBoardConfigDryRunCommandResult,
   type KlAgentDryRunCommandResult,
   type KlAgentLiveSmokeDryRunCommandResult,
   type KlAgentPreflightDryRunCommandResult,
@@ -414,7 +415,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config/
     );
   });
 
@@ -654,6 +655,49 @@ describe("kl CLI handler", () => {
         "http://multica.local/api/tasks"
       ])
     ).rejects.toThrow(/requires exactly one --multica-add-comment-url/);
+  });
+
+  test("agent-day live mode rejects Multica endpoint URLs with credentials", async () => {
+    const rawCredentialUrl = "https://user:real-secret@multica.local/api/tasks";
+    const runCredentialEndpointCommand = () =>
+      handleKlCommand(
+        [
+          "agent-day",
+          "--live",
+          "--date",
+          "2026-06-13",
+          "--multica-create-task-url",
+          rawCredentialUrl,
+          "--multica-add-comment-url",
+          "http://multica.local/api/comments"
+        ],
+        {
+          async fetch(input) {
+            if (String(input).startsWith("https://user:")) {
+              throw new Error("credential endpoint must be rejected before publish fetch");
+            }
+
+            return jsonResponse({ ok: true });
+          }
+        }
+      );
+
+    await expect(runCredentialEndpointCommand()).rejects.toThrow(/must not include URL credentials/);
+    await expect(runCredentialEndpointCommand()).rejects.toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining(rawCredentialUrl)
+      })
+    );
+    await expect(runCredentialEndpointCommand()).rejects.toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining("real-secret")
+      })
+    );
+    await expect(runCredentialEndpointCommand()).rejects.toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining("user:")
+      })
+    );
   });
 
   test("agent-day command validates mode and options", async () => {
@@ -1041,6 +1085,295 @@ describe("kl CLI handler", () => {
         "config/multica/live-smoke.example.json"
       ])
     ).rejects.toThrow(/Unknown option for agent-preflight: --live/);
+  });
+
+  test("agent-board-config dry-run validates the checked-in Multica publish contract without fetching", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      ["agent-board-config", "--dry-run", "--config", "config/multica/board-publish.example.json"],
+      {
+        stdout: stdout.sink,
+        async fetch() {
+          throw new Error("board config dry-run must not fetch");
+        }
+      }
+    )) as KlAgentBoardConfigDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toEqual({
+      command: "agent-board-config",
+      mode: "dry-run",
+      result: {
+        configPath: "config/multica/board-publish.example.json",
+        valid: true,
+        validation: {
+          errors: [],
+          warnings: [
+            "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
+          ],
+          summary: {
+            contractStatus: "inferred_live_smoke_pending",
+            apiBaseUrl: "http://127.0.0.1:8080",
+            appBaseUrl: "http://127.0.0.1:3000",
+            workspaceSlug: "daily-plan",
+            actions: ["create_task", "add_comment"],
+            commentRequiresIssueId: true
+          }
+        },
+        nonCompletionNotice:
+          "This board publish config validation is offline-only. It does not call Multica, prove the board contract, prove live posting, or close M2."
+      }
+    });
+  });
+
+  test("agent-board-config dry-run returns validation errors for an unsafe config", async () => {
+    const configPath = path.join("config", "multica", "board-publish.invalid.test.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify(
+        {
+          contractStatus: "inferred_live_smoke_pending",
+          apiBaseUrl: "http://127.0.0.1:8080",
+          appBaseUrl: "http://127.0.0.1:3000",
+          workspace: {
+            slug: "daily-plan",
+            id: ""
+          },
+          actions: {
+            create_task: {
+              method: "GET",
+              endpointUrl: "http://127.0.0.1:8080/api/issues",
+              payload: {
+                title: "$action.title"
+              }
+            },
+            add_comment: {
+              method: "POST",
+              endpointTemplate: "http://127.0.0.1:8080/api/issues/comments?token=real-token",
+              payload: {
+                content: "$action.body"
+              }
+            }
+          }
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-config",
+        "--dry-run",
+        "--config",
+        configPath
+      ])) as KlAgentBoardConfigDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(
+        expect.arrayContaining([
+          "board publish config actions.create_task.method must be POST.",
+          "board publish config actions.create_task.payload.description must be $action.body.",
+          "board publish config must not contain secret-like value at actions.add_comment.endpointTemplate.",
+          "board publish config actions.add_comment.endpointTemplate must include {issueId}."
+        ])
+      );
+    } finally {
+      unlinkIfExists(configPath);
+    }
+  });
+
+  test("agent-board-config command validates dry-run mode and config path", async () => {
+    await expect(
+      handleKlCommand(["agent-board-config", "--config", "config/multica/board-publish.example.json"])
+    ).rejects.toThrow(/supports only --dry-run/);
+    await expect(
+      handleKlCommand([
+        "agent-board-config",
+        "--live",
+        "--config",
+        "config/multica/board-publish.example.json"
+      ])
+    ).rejects.toThrow(/Unknown option for agent-board-config: --live/);
+    await expect(
+      handleKlCommand(["agent-board-config", "--dry-run", "--config", path.join("..", "board.json")])
+    ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
+  });
+
+  test("agent-board-config command returns validation errors for duplicate JSON keys", async () => {
+    const configPath = path.join("config", "multica", "board-publish.duplicate.test.json");
+    writeFileSync(
+      configPath,
+      [
+        "{",
+        '  "contractStatus": "inferred_live_smoke_pending",',
+        '  "contractStatus": "inferred_live_smoke_pending"',
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-config",
+        "--dry-run",
+        "--config",
+        configPath
+      ])) as KlAgentBoardConfigDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(["Duplicate JSON key contractStatus."]);
+      expect(result.result.validation.warnings).toEqual([
+        "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
+      ]);
+    } finally {
+      unlinkIfExists(configPath);
+    }
+  });
+
+  test("agent-board-config command catches nested duplicate JSON keys", async () => {
+    const configPath = path.join("config", "multica", "board-publish.nested-duplicate.test.json");
+    writeFileSync(
+      configPath,
+      [
+        "{",
+        '  "contractStatus": "inferred_live_smoke_pending",',
+        '  "apiBaseUrl": "http://127.0.0.1:8080",',
+        '  "appBaseUrl": "http://127.0.0.1:3000",',
+        '  "workspace": {',
+        '    "slug": "daily-plan",',
+        '    "slug": "duplicate-plan",',
+        '    "id": ""',
+        "  },",
+        '  "actions": {}',
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-config",
+        "--dry-run",
+        "--config",
+        configPath
+      ])) as KlAgentBoardConfigDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(["Duplicate JSON key slug."]);
+    } finally {
+      unlinkIfExists(configPath);
+    }
+  });
+
+  test("agent-board-config command ignores JSON-looking text inside string values", async () => {
+    const configPath = path.join("config", "multica", "board-publish.string-literal.test.json");
+    writeFileSync(
+      configPath,
+      [
+        "{",
+        '  "contractStatus": "inferred_live_smoke_pending",',
+        '  "apiBaseUrl": "http://127.0.0.1:8080",',
+        '  "appBaseUrl": "http://127.0.0.1:3000",',
+        '  "workspace": {',
+        '    "slug": "daily-plan",',
+        '    "id": ""',
+        "  },",
+        '  "actions": {',
+        '    "create_task": {',
+        '      "method": "POST",',
+        '      "endpointUrl": "http://127.0.0.1:8080/api/issues",',
+        '      "payload": {',
+        '        "title": "$action.title",',
+        '        "description": "$action.body"',
+        "      }",
+        "    },",
+        '    "add_comment": {',
+        '      "method": "POST",',
+        '      "endpointTemplate": "http://127.0.0.1:8080/api/issues/{issueId}/comments",',
+        '      "payload": {',
+        '        "content": "$action.body"',
+        "      }",
+        "    }",
+        "  },",
+        '  "notes": "literal braces { } colon : and escaped quote \\"apiBaseUrl\\": inside a string"',
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-config",
+        "--dry-run",
+        "--config",
+        configPath
+      ])) as KlAgentBoardConfigDryRunCommandResult;
+
+      expect(result.result.valid).toBe(true);
+      expect(result.result.validation.errors).toEqual([]);
+      expect(result.result.validation.summary?.workspaceSlug).toBe("daily-plan");
+    } finally {
+      unlinkIfExists(configPath);
+    }
+  });
+
+  test("agent-board-config command treats unicode-escaped key duplicates as duplicates", async () => {
+    const configPath = path.join("config", "multica", "board-publish.unicode-duplicate.test.json");
+    writeFileSync(
+      configPath,
+      [
+        "{",
+        '  "contractStatus": "inferred_live_smoke_pending",',
+        '  "apiBaseUrl": "http://127.0.0.1:8080",',
+        '  "\\u0061piBaseUrl": "http://127.0.0.1:8081",',
+        '  "appBaseUrl": "http://127.0.0.1:3000"',
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-config",
+        "--dry-run",
+        "--config",
+        configPath
+      ])) as KlAgentBoardConfigDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(["Duplicate JSON key apiBaseUrl."]);
+    } finally {
+      unlinkIfExists(configPath);
+    }
+  });
+
+  test("agent-board-config command returns validation errors for malformed JSON", async () => {
+    const configPath = path.join("config", "multica", "board-publish.malformed.test.json");
+    writeFileSync(configPath, "{\n  \"contractStatus\":\n", "utf8");
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-config",
+        "--dry-run",
+        "--config",
+        configPath
+      ])) as KlAgentBoardConfigDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(expect.arrayContaining([expect.stringContaining("JSON")]));
+      expect(result.result.validation.warnings).toEqual([
+        "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
+      ]);
+    } finally {
+      unlinkIfExists(configPath);
+    }
   });
 
   test("with API key env vars deleted, CLI mock persistent flow runs ingest, plan, quiz, teachback, diagnose, and trace against one DB", async () => {

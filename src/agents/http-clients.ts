@@ -257,6 +257,12 @@ function headersFor(bearerToken: string | undefined, bodyKind?: "json"): Record<
 function redactUrl(value: string, secrets: readonly string[] = []): string {
   try {
     const url = new URL(value);
+    if (url.username.length > 0) {
+      url.username = "REDACTED";
+    }
+    if (url.password.length > 0) {
+      url.password = "REDACTED";
+    }
     for (const key of Array.from(url.searchParams.keys())) {
       if (isSensitiveQueryKey(key)) {
         url.searchParams.set(key, "REDACTED");
@@ -270,16 +276,19 @@ function redactUrl(value: string, secrets: readonly string[] = []): string {
 }
 
 function assertHttpUrl(value: string): void {
+  let url: URL;
   try {
-    const url = new URL(value);
-    if (url.protocol === "http:" || url.protocol === "https:") {
-      return;
-    }
+    url = new URL(value);
   } catch {
-    // Fall through to the uniform error below.
+    throw new AgentHttpError("Multica board endpoint must be an http or https URL.");
   }
 
-  throw new AgentHttpError("Multica board endpoint must be an http or https URL.");
+  if (url.username.length > 0 || url.password.length > 0) {
+    throw new AgentHttpError("Multica board endpoint must not include URL credentials.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new AgentHttpError("Multica board endpoint must be an http or https URL.");
+  }
 }
 
 function isSensitiveQueryKey(value: string): boolean {

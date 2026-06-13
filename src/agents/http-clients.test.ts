@@ -300,6 +300,24 @@ describe("agent HTTP clients", () => {
     await expect(client.publish(action)).rejects.toThrow(/http or https URL/);
   });
 
+  test("board client rejects endpoint URLs with credentials", async () => {
+    const action: AgentIntendedAction = {
+      target: "multica",
+      type: "create_task",
+      title: "Scholar study plan",
+      body: "Study queue",
+      checklist: [],
+      sourceEndpoints: []
+    };
+    const client = createHttpBoardClient({
+      fetch: createSpyFetch([]).fetch,
+      boardId: "daily-plan",
+      createTaskEndpointUrl: "https://user:real-secret@multica.local/api/tasks"
+    });
+
+    await expect(client.publish(action)).rejects.toThrow(/must not include URL credentials/);
+  });
+
   test("executor publishes a redacted blocker when the HTTP read client fails", async () => {
     const secret = "secret-token";
     const plan = createAgentDryRunPlan({
@@ -424,6 +442,11 @@ describe("agent HTTP clients", () => {
         input: "GET http://127.0.0.1:3000/api/plan/today?sid=real-session",
         leak: "real-session",
         expected: "sid=REDACTED"
+      },
+      {
+        input: "GET https://user:real-secret@example.com/api/issues",
+        leak: "real-secret",
+        expected: "https://REDACTED:REDACTED@example.com/api/issues"
       },
       {
         input: "GET G:\\pi-harness\\secret.log?token=real-token",

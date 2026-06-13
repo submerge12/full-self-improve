@@ -104,6 +104,19 @@ This is a manifest-validation dry run only. It reads the manifest inside this ch
 
 A passing result means the checked-in manifest still describes the offline board-day contract for the requested date. It does not execute Multica, install a scheduler, prove live board posting, prove two consecutive hands-free days, or close M2.
 
+## Offline Board-Publish Config Validation
+
+Before the live gate, validate the checked-in Multica publish mapping separately from the live-smoke manifest:
+
+```powershell
+npm run kl -- agent-board-config --dry-run `
+  --config config/multica/board-publish.example.json
+```
+
+This command validates only the offline publish config. It reads the publish config inside this checkout and checks that the issue/comment mappings are HTTP-only, secret-free, filesystem-free, still marked `inferred_live_smoke_pending`, and shaped for the current dry-run action types. It must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not publish board items, must not read or write the Multica or pi-harness checkouts, and must not accept `--live`.
+
+A passing result means `config/multica/board-publish.example.json` is internally safe to carry into the live gate. It does not mean the live client renders this payload template yet; `agent-day --live` still uses explicit endpoint flags until the board contract is confirmed. It does not prove the Multica API contract, resolve `{issueId}`, install a scheduler, prove live board posting, prove two consecutive hands-free days, or close M2.
+
 ## Offline Preflight Report
 
 Before attempting a live smoke, run the offline preflight report to confirm the scheduler dry-run date and the manifest's first evidence day are aligned:
@@ -123,4 +136,4 @@ The report embeds the scheduler dry-run output, the live-smoke manifest validati
 
 ## Live Gate
 
-Before enabling live publish, verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.
+Before enabling live publish, require passing `agent-live-smoke --dry-run`, `agent-board-config --dry-run`, and `agent-preflight --dry-run`; then verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.

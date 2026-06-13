@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -31,6 +31,18 @@ function createCapture(): { sink: { write(chunk: string | Uint8Array): boolean }
       return output;
     }
   };
+}
+
+function unlinkIfExists(filePath: string): void {
+  if (existsSync(filePath)) {
+    unlinkSync(filePath);
+  }
+}
+
+function rmdirIfEmpty(dirPath: string): void {
+  if (existsSync(dirPath) && readdirSync(dirPath).length === 0) {
+    rmdirSync(dirPath);
+  }
 }
 
 function parseCapturedJson(capture: { text(): string }): KlCommandResult {
@@ -383,6 +395,157 @@ describe("kl CLI handler", () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
       /Expected one of: ingest, plan, quiz, teachback, diagnose, trace/
     );
+  });
+
+  test("with API key env vars deleted, CLI mock persistent flow runs ingest, plan, quiz, teachback, diagnose, and trace against one DB", async () => {
+    const envNames = ["DEEPSEEK_API_KEY", "QWEN_API_KEY", "OPENAI_API_KEY", "LLM_PROVIDER"] as const;
+    const savedEnv = new Map<(typeof envNames)[number], string | undefined>(
+      envNames.map((name) => [name, process.env[name]])
+    );
+    const vaultDir = mkdtempSync(path.join(tmpdir(), "kl-cli-full-flow-vault-"));
+    const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-full-flow-db-"));
+    const dbPath = path.join(dbDir, "knowledge-loop.db");
+    const sourcePath = path.join(vaultDir, "Learning.md");
+    const conceptSlug = "retrieval-practice";
+
+    writeFileSync(
+      sourcePath,
+      [
+        "---",
+        "title: Mock Full Flow",
+        "---",
+        "# Retrieval Practice",
+        "Retrieval practice uses active recall before review to strengthen durable memory."
+      ].join("\n"),
+      "utf8"
+    );
+
+    try {
+      for (const name of envNames) {
+        delete process.env[name];
+      }
+
+      const ingest = await handleKlCommand(["ingest", "--vault", vaultDir, "--db", dbPath]);
+      expect(ingest.command).toBe("ingest");
+      expect(ingest.mode).toBe("mock-persistent");
+      if (ingest.command !== "ingest" || ingest.mode !== "mock-persistent") {
+        throw new Error("Expected persistent ingest result.");
+      }
+      expect(ingest.result).toMatchObject({
+        sourcesSeen: 1,
+        sourcesProcessed: 1,
+        sourcesFailed: 0,
+        chunksCreated: 1,
+        conceptsCreated: 1,
+        pagesCreated: 1
+      });
+
+      const plan = await handleKlCommand(["plan", "--date", "2026-06-13", "--db", dbPath]);
+      expect(plan.command).toBe("plan");
+      expect(plan.mode).toBe("mock-persistent");
+      if (plan.command !== "plan" || plan.mode !== "mock-persistent") {
+        throw new Error("Expected persistent plan result.");
+      }
+      expect(plan.result).toMatchObject({
+        date: "2026-06-13",
+        status: "planned"
+      });
+      expect(plan.result.queue.map((activity) => activity.conceptSlug)).toContain(conceptSlug);
+
+      const quiz = (await handleKlCommand([
+        "quiz",
+        "--db",
+        dbPath,
+        "--item",
+        "What does retrieval practice use before review?",
+        "--concept",
+        conceptSlug,
+        "--answer",
+        "active recall",
+        "--response",
+        "active recall"
+      ])) as KlPersistentQuizCommandResult;
+      expect(quiz.command).toBe("quiz");
+      expect(quiz.mode).toBe("mock-persistent");
+      expect(quiz.result).toMatchObject({
+        conceptSlug,
+        verdict: "correct",
+        gradingMethod: "exact"
+      });
+      expect(quiz.result.itemId).toBeGreaterThan(0);
+      expect(quiz.result.attemptId).toBeGreaterThan(0);
+
+      const teachback = (await handleKlCommand([
+        "teachback",
+        "--db",
+        dbPath,
+        "--concept",
+        conceptSlug,
+        "--transcript",
+        "Retrieval practice uses active recall before review to strengthen durable memory."
+      ])) as KlPersistentTeachbackCommandResult;
+      expect(teachback.command).toBe("teachback");
+      expect(teachback.mode).toBe("mock-persistent");
+      expect(teachback.result).toMatchObject({
+        conceptSlug,
+        gradingMethod: "rubric"
+      });
+      expect(teachback.result.rubricReport.score).toBeGreaterThan(0);
+      expect(teachback.result.rubricReport.gaps).toEqual(expect.any(Array));
+      expect(teachback.result.teachbackId).toBeGreaterThan(0);
+
+      const diagnose = await handleKlCommand(["diagnose", "--db", dbPath]);
+      expect(diagnose.command).toBe("diagnose");
+      expect(diagnose.mode).toBe("mock-persistent");
+      if (diagnose.command !== "diagnose" || diagnose.mode !== "mock-persistent") {
+        throw new Error("Expected persistent diagnose result.");
+      }
+      expect(diagnose.result.weakSpots.map((weakSpot) => weakSpot.conceptSlug)).toContain(conceptSlug);
+      expect(diagnose.result.summary.weakSpotCount).toBeGreaterThan(0);
+
+      const trace = (await handleKlCommand(["trace", "--db", dbPath, "--run", ingest.result.runId])) as TraceCliCommandResult;
+      expect(trace.command).toBe("trace");
+      expect(trace.mode).toBe("mock-persistent");
+      expect(trace.result.runId).toBe(ingest.result.runId);
+      expect(trace.result.eventCount).toBe(ingest.result.traceEvents.length);
+      expect(trace.result.events.map((event) => event.stage)).toEqual(
+        expect.arrayContaining(["chunk", "extract", "merge", "link", "page-gen"])
+      );
+      expect(trace.result.events.every((event) => event.runId === ingest.result.runId)).toBe(true);
+
+      expect(countRows(dbPath, "sources")).toBe(1);
+      expect(countRows(dbPath, "chunks")).toBe(1);
+      expect(countRows(dbPath, "concepts")).toBe(1);
+      expect(countRows(dbPath, "pages")).toBe(1);
+      expect(countRows(dbPath, "study_plans")).toBe(1);
+      expect(countRows(dbPath, "items")).toBe(1);
+      expect(countRows(dbPath, "attempts")).toBe(1);
+      expect(countRows(dbPath, "teachbacks")).toBe(1);
+      expect(countRows(dbPath, "mastery")).toBe(1);
+      expect(countRows(dbPath, "trace_events")).toBe(
+        ingest.result.traceEvents.length +
+          plan.result.traceEvents.length +
+          quiz.result.traceEvents.length +
+          teachback.result.traceEvents.length +
+          diagnose.result.traceEvents.length
+      );
+    } finally {
+      for (const [name, value] of savedEnv) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+
+      unlinkIfExists(sourcePath);
+      unlinkIfExists(dbPath);
+      unlinkIfExists(`${dbPath}-journal`);
+      unlinkIfExists(`${dbPath}-wal`);
+      unlinkIfExists(`${dbPath}-shm`);
+      rmdirIfEmpty(vaultDir);
+      rmdirIfEmpty(dbDir);
+    }
   });
 
   test("trace returns persisted events for a run in insertion order and writes JSON", async () => {

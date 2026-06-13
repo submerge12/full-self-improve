@@ -21,6 +21,12 @@ import {
 } from "../agents/dry-run.js";
 import { executeAgentDay, type AgentDayRunReport } from "../agents/day-runner.js";
 import { createFetchAgentReadClient, createHttpBoardClient, type AgentFetch } from "../agents/http-clients.js";
+import {
+  createAgentScheduleReport,
+  createAgentScheduleTiming,
+  type AgentScheduleDryRunReport,
+  type AgentScheduleArgvOptions
+} from "../agents/schedule.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -158,6 +164,14 @@ export interface KlAgentDayLiveCommandResult {
 
 export type KlAgentDayCommandResult = KlAgentDayDryRunCommandResult | KlAgentDayLiveCommandResult;
 
+export interface KlAgentScheduleDryRunCommandResult {
+  command: "agent-schedule";
+  mode: "dry-run";
+  result: AgentScheduleDryRunReport;
+}
+
+export type KlAgentScheduleCommandResult = KlAgentScheduleDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -166,7 +180,8 @@ export type KlCommandResult =
   | KlDiagnoseCommandResult
   | KlTraceCommandResult
   | KlAgentCommandResult
-  | KlAgentDayCommandResult;
+  | KlAgentDayCommandResult
+  | KlAgentScheduleCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -207,8 +222,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentDayCommand(args, io);
   }
 
+  if (command === "agent-schedule") {
+    return runAgentScheduleCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule.`
   );
 }
 
@@ -483,6 +502,38 @@ async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Pro
   };
 }
 
+function runAgentScheduleCommand(args: readonly string[]): KlAgentScheduleCommandResult {
+  const { dryRun, options } = parseAgentScheduleOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-schedule supports only --dry-run.");
+  }
+
+  const timing = createAgentScheduleTiming({
+    now: requireOne(options, "--now", "agent-schedule"),
+    timezone: requireOne(options, "--timezone", "agent-schedule"),
+    dailyAt: requireOne(options, "--daily-at", "agent-schedule")
+  });
+  const config = loadOptionalAgentConfig(options, "agent-schedule");
+  const argvOptions = agentScheduleArgvOptions(options, "agent-schedule");
+  const plan = createAgentDayDryRunPlan(
+    agentDayInputFromConfig({
+      config,
+      overrides: agentDryRunOverrides(options, "agent-schedule"),
+      date: timing.date
+    })
+  );
+
+  return {
+    command: "agent-schedule",
+    mode: "dry-run",
+    result: createAgentScheduleReport({
+      timing,
+      plan,
+      argvOptions
+    })
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -550,6 +601,23 @@ function parseAgentDayOptions(args: readonly string[]): {
   );
 }
 
+function parseAgentScheduleOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(
+    args,
+    new Set([
+      "--now",
+      "--timezone",
+      "--daily-at",
+      "--knowledge-loop-url",
+      "--compass-health-url",
+      "--adapter",
+      "--board",
+      "--config"
+    ]),
+    "agent-schedule"
+  );
+}
+
 function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {
   const configPath = optionalOne(options, "--config", command);
 
@@ -567,6 +635,23 @@ function agentDryRunOverrides(options: Map<string, string[]>, command: string): 
     ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
     ...(adapterId === undefined ? {} : { adapterId }),
     ...(multicaBoard === undefined ? {} : { multicaBoard })
+  };
+}
+
+function agentScheduleArgvOptions(options: Map<string, string[]>, command: string): AgentScheduleArgvOptions {
+  const configPath = optionalOne(options, "--config", command);
+  const dryRunOverrides = agentDryRunOverrides(options, command);
+
+  return {
+    ...(configPath === undefined ? {} : { configPath }),
+    ...(dryRunOverrides.knowledgeLoopBaseUrl === undefined
+      ? {}
+      : { knowledgeLoopBaseUrl: dryRunOverrides.knowledgeLoopBaseUrl }),
+    ...(dryRunOverrides.compassHealthBaseUrl === undefined
+      ? {}
+      : { compassHealthBaseUrl: dryRunOverrides.compassHealthBaseUrl }),
+    ...(dryRunOverrides.adapterId === undefined ? {} : { adapterId: dryRunOverrides.adapterId }),
+    ...(dryRunOverrides.multicaBoard === undefined ? {} : { multicaBoard: dryRunOverrides.multicaBoard })
   };
 }
 

@@ -69,6 +69,20 @@ npm run kl -- agent-day --live `
 
 The `--multica-add-comment-url` value must be a concrete endpoint confirmed against a running Multica instance. Because `config/multica/board-publish.example.json` is still `inferred_live_smoke_pending`, treat the issue/comment URLs as candidate wiring until a live smoke confirms the board contract.
 
+## Scheduler Dry-Run
+
+Before installing any daemon, cron job, or Windows scheduled task, verify scheduler intent deterministically:
+
+```powershell
+npm run kl -- agent-schedule --dry-run `
+  --now 2026-06-14T07:30:00+08:00 `
+  --timezone Asia/Shanghai `
+  --daily-at 07:30 `
+  --config config/agents.example.json
+```
+
+This prints whether the daily `agent-day` run is due, the local board-day window, the exact dry-run `agent-day` argv the scheduler would invoke, and the embedded dry-run day plan. It does not start a timer, call Multica, call compass-health, or prove the M2 two-day hands-free requirement.
+
 ## Live Gate
 
 Before enabling live publish, verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.

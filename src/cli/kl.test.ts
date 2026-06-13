@@ -15,6 +15,7 @@ import {
   type KlAgentDayDryRunCommandResult,
   type KlAgentDayLiveCommandResult,
   type KlAgentDryRunCommandResult,
+  type KlAgentScheduleDryRunCommandResult,
   type KlCommandResult,
   type KlPersistentQuizCommandResult,
   type KlPersistentTeachbackCommandResult
@@ -411,7 +412,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule/
     );
   });
 
@@ -663,6 +664,102 @@ describe("kl CLI handler", () => {
     await expect(handleKlCommand(["agent-day", "--dry-run", "--bogus", "1", "--date", "2026-06-13"])).rejects.toThrow(
       /Unknown option for agent-day: --bogus/
     );
+  });
+
+  test("agent-schedule dry-run prints deterministic scheduler intent without executing the day", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "agent-schedule",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--config",
+        "config/agents.example.json",
+        "--board",
+        "Holly Daily"
+      ],
+      {
+        stdout: stdout.sink,
+        async fetch() {
+          throw new Error("schedule dry-run must not fetch");
+        }
+      }
+    )) as KlAgentScheduleDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-schedule",
+      mode: "dry-run",
+      result: {
+        timezone: "Asia/Shanghai",
+        dailyAt: "07:30",
+        now: "2026-06-14T07:30:00+08:00",
+        due: true,
+        date: "2026-06-14",
+        window: {
+          startsAt: "2026-06-14T07:30:00+08:00",
+          endsBefore: "2026-06-15T07:30:00+08:00"
+        },
+        wouldRun: {
+          command: "agent-day",
+          mode: "dry-run",
+          argv: [
+            "agent-day",
+            "--dry-run",
+            "--date",
+            "2026-06-14",
+            "--config",
+            "config/agents.example.json",
+            "--board",
+            "Holly Daily"
+          ]
+        },
+        plan: {
+          mode: "dry-run",
+          date: "2026-06-14",
+          multicaBoard: "Holly Daily",
+          externalWrites: []
+        }
+      }
+    });
+  });
+
+  test("agent-schedule command validates dry-run mode and schedule inputs", async () => {
+    await expect(handleKlCommand(["agent-schedule", "--now", "2026-06-14T07:30:00+08:00"])).rejects.toThrow(
+      /supports only --dry-run/
+    );
+    await expect(handleKlCommand(["agent-schedule", "--live", "--now", "2026-06-14T07:30:00+08:00"])).rejects.toThrow(
+      /Unknown option for agent-schedule: --live/
+    );
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "7:30"
+      ])
+    ).rejects.toThrow(/Invalid agent schedule --daily-at/);
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Mars/Base",
+        "--daily-at",
+        "07:30"
+      ])
+    ).rejects.toThrow(/Invalid agent schedule timezone/);
   });
 
   test("with API key env vars deleted, CLI mock persistent flow runs ingest, plan, quiz, teachback, diagnose, and trace against one DB", async () => {

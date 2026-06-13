@@ -8,6 +8,24 @@ import {
   type AgentPublishResult,
   type AgentReadResult
 } from "./executor.js";
+import { redactText } from "./http-clients.js";
+
+export type AgentLlmCostSource = "dry-run-no-llm" | "not_configured" | "pi-harness-live" | "cost_unavailable" | "mixed";
+
+export interface AgentLlmCostSnapshot {
+  readonly estimatedUsd: number;
+  readonly source: Exclude<AgentLlmCostSource, "mixed">;
+  readonly currency?: "USD";
+  readonly detail?: string;
+}
+
+export interface AgentCostClient {
+  readCost(plan: AgentDryRunPlan): Promise<AgentLlmCostSnapshot>;
+}
+
+export interface AgentDayExecutionClients extends AgentExecutionClients {
+  readonly costClient?: AgentCostClient;
+}
 
 export interface AgentDayRunEntry {
   readonly role: AgentRole;
@@ -19,7 +37,9 @@ export interface AgentDayRunEntry {
   readonly blocker?: AgentIntendedAction;
   readonly llmCost: {
     readonly estimatedUsd: number;
-    readonly source: "dry-run-no-llm";
+    readonly source: Exclude<AgentLlmCostSource, "mixed">;
+    readonly currency?: "USD";
+    readonly detail?: string;
   };
 }
 
@@ -42,12 +62,15 @@ export interface AgentDayRunReport {
   };
   readonly llmCost: {
     readonly estimatedUsd: number;
-    readonly source: "dry-run-no-llm";
+    readonly source: AgentLlmCostSource;
+    readonly currency?: "USD";
     readonly perAgent: ReadonlyArray<{
       readonly role: AgentRole;
       readonly phase: AgentPhase;
       readonly estimatedUsd: number;
-      readonly source: "dry-run-no-llm";
+      readonly source: Exclude<AgentLlmCostSource, "mixed">;
+      readonly currency?: "USD";
+      readonly detail?: string;
     }>;
   };
 }
@@ -61,14 +84,15 @@ export interface AgentDaySkippedEntry {
 export async function executeAgentDay(
   plan: AgentDayDryRunPlan,
   mode: AgentExecutionMode,
-  clients: AgentExecutionClients = {}
+  clients: AgentDayExecutionClients = {}
 ): Promise<AgentDayRunReport> {
   const entries: AgentDayRunEntry[] = [];
 
   for (const agentPlan of plan.sequence) {
     const result = await executeAgentPlan(agentPlan, mode, clients);
+    const llmCost = await costFor(agentPlan, mode, clients.costClient);
     entries.push(
-      entryFor(agentPlan, result.status, result.reads, result.publishedActions, result.publishFailures, result.blocker)
+      entryFor(agentPlan, result.status, result.reads, result.publishedActions, result.publishFailures, result.blocker, llmCost)
     );
   }
 
@@ -95,17 +119,34 @@ export async function executeAgentDay(
       publishFailures: publishFailures.length,
       blockers: blockers.length
     },
-    llmCost: {
-      estimatedUsd: entries.reduce((total, entry) => total + entry.llmCost.estimatedUsd, 0),
-      source: "dry-run-no-llm",
-      perAgent: entries.map((entry) => ({
+    llmCost: costReportFor(entries)
+  };
+}
+
+function costReportFor(entries: readonly AgentDayRunEntry[]): AgentDayRunReport["llmCost"] {
+  const perAgent = entries.map((entry) => ({
         role: entry.role,
         phase: entry.phase,
         estimatedUsd: entry.llmCost.estimatedUsd,
-        source: entry.llmCost.source
-      }))
-    }
+        source: entry.llmCost.source,
+        ...(entry.llmCost.currency === undefined ? {} : { currency: entry.llmCost.currency }),
+        ...(entry.llmCost.detail === undefined ? {} : { detail: entry.llmCost.detail })
+      }));
+  const sources = new Set(perAgent.map((entry) => entry.source));
+  const firstCurrency = perAgent[0]?.currency;
+  const singleCurrency =
+    firstCurrency !== undefined && perAgent.every((entry) => entry.currency === firstCurrency) ? firstCurrency : undefined;
+
+  return {
+    estimatedUsd: roundCost(perAgent.reduce((total, entry) => total + entry.estimatedUsd, 0)),
+    source: sources.size === 1 ? perAgent[0]?.source ?? "not_configured" : "mixed",
+    perAgent,
+    ...(singleCurrency === undefined ? {} : { currency: singleCurrency })
   };
+}
+
+function roundCost(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
 
 function entryFor(
@@ -114,7 +155,8 @@ function entryFor(
   reads: readonly AgentReadResult[],
   publishedActions: readonly AgentPublishResult[],
   publishFailures: readonly AgentPublishFailure[],
-  blocker: AgentIntendedAction | undefined
+  blocker: AgentIntendedAction | undefined,
+  llmCost: AgentLlmCostSnapshot
 ): AgentDayRunEntry {
   return {
     role: plan.role,
@@ -124,7 +166,46 @@ function entryFor(
     publishedActions,
     publishFailures,
     ...(blocker === undefined ? {} : { blocker }),
-    llmCost: plan.llmCost
+    llmCost
+  };
+}
+
+async function costFor(
+  plan: AgentDryRunPlan,
+  mode: AgentExecutionMode,
+  costClient: AgentCostClient | undefined
+): Promise<AgentLlmCostSnapshot> {
+  if (mode === "dry-run") {
+    return plan.llmCost;
+  }
+
+  if (costClient === undefined) {
+    return {
+      estimatedUsd: 0,
+      source: "not_configured",
+      currency: "USD",
+      detail: "No pi-harness cost snapshot client is configured for this run."
+    };
+  }
+
+  try {
+    return redactedCostSnapshot(await costClient.readCost(plan));
+  } catch (error) {
+    return {
+      estimatedUsd: 0,
+      source: "cost_unavailable",
+      currency: "USD",
+      detail: `Cost snapshot unavailable: ${redactText(error instanceof Error ? error.message : String(error))}`
+    };
+  }
+}
+
+function redactedCostSnapshot(snapshot: AgentLlmCostSnapshot): AgentLlmCostSnapshot {
+  return {
+    estimatedUsd: snapshot.estimatedUsd,
+    source: snapshot.source,
+    ...(snapshot.currency === undefined ? {} : { currency: snapshot.currency }),
+    ...(snapshot.detail === undefined ? {} : { detail: redactText(snapshot.detail) })
   };
 }
 

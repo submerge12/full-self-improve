@@ -153,6 +153,12 @@ The live Scholar evening phase reads the exact `GET /api/mastery/summary` endpoi
 
 This renderer is deterministic and redaction-safe, but it does not call the API itself and does not prove the live evening board post. If the mastery summary body is malformed, unwrapped, or from a lookalike endpoint, the live runner publishes a blocker instead of a static or mismatched mastery report. The M2 live gate still requires comparing the captured evening Scholar board comment against the live `GET /api/mastery/summary` response.
 
+## Daily Cost Visibility
+
+The day runner report always includes an `llmCost` summary with per-agent entries. Dry-run reports stay `dry-run-no-llm`. Live reports without a pi-harness cost snapshot client are explicit `not_configured` entries with zero cost, so the live smoke cannot accidentally treat dry-run cost metadata as real usage.
+
+When a future pi-harness cost snapshot client is injected, each agent entry can surface the external `pi-harness-live` cost, currency, and detail, and the day report totals those entries. This wiring makes cost visible in the agent-day report, but it does not prove the pi-harness dependency is installed, does not read the pi-harness checkout, and does not close the M2 live cost proof until a real run captures non-placeholder cost data.
+
 ## Offline Board-Day Evidence Validation
 
 After real board observations are captured, validate the evidence file against the live-smoke manifest:

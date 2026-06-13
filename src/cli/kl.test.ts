@@ -631,6 +631,37 @@ describe("kl CLI handler", () => {
           publishedActions: 4,
           blockers: 0,
           publishFailures: 0
+        },
+        llmCost: {
+          estimatedUsd: 0,
+          source: "not_configured",
+          perAgent: [
+            {
+              role: "librarian",
+              phase: "nightly-ingest",
+              estimatedUsd: 0,
+              source: "not_configured",
+              detail: "No pi-harness cost snapshot client is configured for this run."
+            },
+            {
+              role: "scholar",
+              phase: "morning-plan",
+              estimatedUsd: 0,
+              source: "not_configured"
+            },
+            {
+              role: "nutritionist",
+              phase: "daily-meals",
+              estimatedUsd: 0,
+              source: "not_configured"
+            },
+            {
+              role: "scholar",
+              phase: "evening-mastery",
+              estimatedUsd: 0,
+              source: "not_configured"
+            }
+          ]
         }
       }
     });

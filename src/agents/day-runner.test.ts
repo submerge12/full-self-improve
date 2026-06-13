@@ -113,6 +113,128 @@ describe("agent day runner", () => {
     ]);
   });
 
+  test("live day execution surfaces injected per-agent llm cost snapshots", async () => {
+    const plan = createAgentDayDryRunPlan({ date: "2026-06-13" });
+    const costEvents: string[] = [];
+
+    const report = await executeAgentDay(plan, "live", {
+      readClient: {
+        async read(endpoint) {
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
+        }
+      },
+      boardClient: {
+        async publish(action) {
+          return { action, id: action.title };
+        }
+      },
+      costClient: {
+        async readCost(planForCost) {
+          costEvents.push(`${planForCost.role}:${planForCost.phase}`);
+          return {
+            estimatedUsd: planForCost.phase === "daily-meals" ? 0 : 0.0125,
+            source: "pi-harness-live",
+            currency: "USD",
+            detail: `pi-harness session ${planForCost.role}:${planForCost.phase}`
+          };
+        }
+      }
+    });
+
+    expect(costEvents).toEqual([
+      "librarian:nightly-ingest",
+      "scholar:morning-plan",
+      "nutritionist:daily-meals",
+      "scholar:evening-mastery"
+    ]);
+    expect(report.entries.map((entry) => `${entry.role}:${entry.phase}:${entry.llmCost.estimatedUsd}`)).toEqual([
+      "librarian:nightly-ingest:0.0125",
+      "scholar:morning-plan:0.0125",
+      "nutritionist:daily-meals:0",
+      "scholar:evening-mastery:0.0125"
+    ]);
+    expect(report.llmCost).toMatchObject({
+      estimatedUsd: 0.0375,
+      source: "pi-harness-live"
+    });
+    expect(report.llmCost.perAgent[0]).toMatchObject({
+      role: "librarian",
+      phase: "nightly-ingest",
+      source: "pi-harness-live",
+      currency: "USD",
+      detail: "pi-harness session librarian:nightly-ingest"
+    });
+  });
+
+  test("live day execution redacts injected llm cost detail", async () => {
+    const secret = "real-token";
+    const plan = createAgentDayDryRunPlan({ date: "2026-06-13" });
+
+    const report = await executeAgentDay(plan, "live", {
+      readClient: {
+        async read(endpoint) {
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
+        }
+      },
+      boardClient: {
+        async publish(action) {
+          return { action, id: action.title };
+        }
+      },
+      costClient: {
+        async readCost() {
+          return {
+            estimatedUsd: 0.01,
+            source: "pi-harness-live",
+            currency: "USD",
+            detail: `Authorization: Bearer ${secret} at G:\\pi-harness\\private\\cost.json`
+          };
+        }
+      }
+    });
+
+    const serialized = JSON.stringify(report.llmCost);
+    expect(serialized).toContain("Authorization: Bearer REDACTED");
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("G:\\pi-harness");
+  });
+
+  test("live day execution keeps the report when an injected llm cost snapshot fails", async () => {
+    const secret = "real-token";
+    const plan = createAgentDayDryRunPlan({ date: "2026-06-13" });
+
+    const report = await executeAgentDay(plan, "live", {
+      readClient: {
+        async read(endpoint) {
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
+        }
+      },
+      boardClient: {
+        async publish(action) {
+          return { action, id: action.title };
+        }
+      },
+      costClient: {
+        async readCost() {
+          throw new Error(`Cost snapshot failed with token=${secret} at /home/holly/pi-harness/cost.json`);
+        }
+      }
+    });
+
+    const serialized = JSON.stringify(report.llmCost);
+    expect(report.status).toBe("completed");
+    expect(report.llmCost.source).toBe("cost_unavailable");
+    expect(report.llmCost.perAgent.map((entry) => entry.source)).toEqual([
+      "cost_unavailable",
+      "cost_unavailable",
+      "cost_unavailable",
+      "cost_unavailable"
+    ]);
+    expect(serialized).toContain("token=REDACTED");
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("/home/holly");
+  });
+
   test("live day execution publishes a blocker for one failed agent and continues independent later agents", async () => {
     const secret = "secret-token";
     const plan = createAgentDayDryRunPlan({ date: "2026-06-13" });

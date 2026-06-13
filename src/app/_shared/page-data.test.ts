@@ -8,6 +8,7 @@ import {
   recordMasteryUpdate
 } from "../../db/content-store.js";
 import {
+  getPublicWikiPageDetail,
   getLearningDashboardData,
   listPublicWikiPageSummaries,
   readWithRuntimeDb
@@ -21,7 +22,7 @@ afterEach(() => {
 });
 
 describe("page data helpers", () => {
-  test("public wiki summaries exclude private pages", () => {
+  test("public wiki summaries exclude private pages and include ids for linking", () => {
     db = createMigratedDb();
     const publicConceptId = insertConcept(db, "public-concept", "Public Concept");
     const privateConceptId = insertConcept(db, "private-concept", "Private Concept");
@@ -57,6 +58,98 @@ describe("page data helpers", () => {
         excerpt: "Public Concept Visible summary."
       }
     ]);
+  });
+
+  test("public wiki detail returns public page with citations in stored order", () => {
+    db = createMigratedDb();
+    const conceptId = insertConcept(db, "ordered-citations", "Ordered Citations");
+    const firstCitation = createSourceWithChunk(db, {
+      adapterId: "vault",
+      docRef: "first.md",
+      title: "First Source",
+      fingerprint: "first-fingerprint",
+      chunkText: "First cited chunk"
+    }).chunk;
+    const secondCitation = createSourceWithChunk(db, {
+      adapterId: "markdown",
+      docRef: "second.md",
+      title: "Second Source",
+      fingerprint: "second-fingerprint",
+      chunkText: "Second cited chunk"
+    }).chunk;
+    const page = createPage(db, {
+      conceptId,
+      version: 3,
+      markdown: "# Ordered Citations\n\nThe page body.",
+      citationIds: [secondCitation.id, firstCitation.id],
+      visibility: "public"
+    });
+
+    expect(getPublicWikiPageDetail(db, page.id)).toEqual({
+      id: page.id,
+      conceptId,
+      conceptName: "Ordered Citations",
+      version: 3,
+      markdown: "# Ordered Citations\n\nThe page body.",
+      citations: [
+        {
+          chunkId: secondCitation.id,
+          text: "Second cited chunk",
+          sourceTitle: "Second Source",
+          docRef: "second.md",
+          adapterId: "markdown"
+        },
+        {
+          chunkId: firstCitation.id,
+          text: "First cited chunk",
+          sourceTitle: "First Source",
+          docRef: "first.md",
+          adapterId: "vault"
+        }
+      ]
+    });
+  });
+
+  test("public wiki detail returns null for private, missing, and invalid page ids", () => {
+    db = createMigratedDb();
+    const conceptId = insertConcept(db, "private-detail", "Private Detail");
+    const privatePage = createPage(db, {
+      conceptId,
+      version: 1,
+      markdown: "# Private Detail",
+      citationIds: [],
+      visibility: "private"
+    });
+
+    expect(getPublicWikiPageDetail(db, privatePage.id)).toBeNull();
+    expect(getPublicWikiPageDetail(db, 999)).toBeNull();
+    expect(getPublicWikiPageDetail(db, "not-a-page")).toBeNull();
+  });
+
+  test("public wiki detail throws when a stored citation chunk is missing", () => {
+    const testDb = createMigratedDb();
+    db = testDb;
+    const conceptId = insertConcept(testDb, "broken-citation", "Broken Citation");
+    testDb.prepare(
+      `INSERT INTO pages (concept_id, version, markdown, citations, visibility)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(conceptId, 1, "# Broken Citation", JSON.stringify([404]), "public");
+
+    expect(() => getPublicWikiPageDetail(testDb, 1)).toThrow("Public wiki page 1 cites missing chunk 404");
+  });
+
+  test("public wiki detail throws when a stored citation id is malformed", () => {
+    const testDb = createMigratedDb();
+    db = testDb;
+    const conceptId = insertConcept(testDb, "malformed-citation", "Malformed Citation");
+    testDb.prepare(
+      `INSERT INTO pages (concept_id, version, markdown, citations, visibility)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(conceptId, 1, "# Malformed Citation", JSON.stringify(["bad"]), "public");
+
+    expect(() => getPublicWikiPageDetail(testDb, 1)).toThrow(
+      "Public wiki page 1 contains an invalid citation id"
+    );
   });
 
   test("learning dashboard returns empty plan and mastery states from empty DB", () => {

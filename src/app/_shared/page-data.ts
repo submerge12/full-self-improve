@@ -11,6 +11,23 @@ export interface PublicWikiPageSummary {
   readonly excerpt: string;
 }
 
+export interface PublicWikiPageCitation {
+  readonly chunkId: number;
+  readonly text: string;
+  readonly sourceTitle: string;
+  readonly docRef: string;
+  readonly adapterId: string;
+}
+
+export interface PublicWikiPageDetail {
+  readonly id: number;
+  readonly conceptId: number;
+  readonly conceptName: string;
+  readonly version: number;
+  readonly markdown: string;
+  readonly citations: readonly PublicWikiPageCitation[];
+}
+
 export interface LearningDashboardPlan {
   readonly date: string;
   readonly queue: unknown;
@@ -44,6 +61,23 @@ interface PublicWikiPageSummaryRow {
   conceptName: string;
   version: number;
   markdown: string;
+}
+
+interface PublicWikiPageDetailRow {
+  id: number;
+  conceptId: number;
+  conceptName: string;
+  version: number;
+  markdown: string;
+  citations: string;
+}
+
+interface PublicWikiPageCitationRow {
+  chunkId: number;
+  text: string;
+  sourceTitle: string;
+  docRef: string;
+  adapterId: string;
 }
 
 interface StudyPlanRow {
@@ -87,6 +121,46 @@ export function listPublicWikiPageSummaries(db: Database.Database): PublicWikiPa
   }));
 }
 
+export function getPublicWikiPageDetail(
+  db: Database.Database,
+  pageId: string | number
+): PublicWikiPageDetail | null {
+  const parsedPageId = parsePageId(pageId);
+
+  if (parsedPageId === null) {
+    return null;
+  }
+
+  const row = db
+    .prepare(
+      `SELECT
+         pages.id,
+         pages.concept_id AS conceptId,
+         concepts.name AS conceptName,
+         pages.version,
+         pages.markdown,
+         pages.citations
+       FROM pages
+       INNER JOIN concepts ON concepts.id = pages.concept_id
+       WHERE pages.id = ?
+         AND pages.visibility = 'public'`
+    )
+    .get(parsedPageId) as PublicWikiPageDetailRow | undefined;
+
+  if (row === undefined) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    conceptId: row.conceptId,
+    conceptName: row.conceptName,
+    version: row.version,
+    markdown: row.markdown,
+    citations: resolvePublicWikiPageCitations(db, row.id, row.citations)
+  };
+}
+
 export function getLearningDashboardData(db: Database.Database, date: string): LearningDashboardData {
   return {
     date,
@@ -97,6 +171,10 @@ export function getLearningDashboardData(db: Database.Database, date: string): L
 
 export function getRuntimePublicWikiPageSummaries(): PublicWikiPageSummary[] {
   return readWithRuntimeDb((db) => listPublicWikiPageSummaries(db));
+}
+
+export function getRuntimePublicWikiPageDetail(pageId: string | number): PublicWikiPageDetail | null {
+  return readWithRuntimeDb((db) => getPublicWikiPageDetail(db, pageId));
 }
 
 export function getRuntimeLearningDashboardData(date = todayDateString()): LearningDashboardData {
@@ -162,6 +240,71 @@ function listMasterySummaries(db: Database.Database): LearningDashboardMastery[]
     attemptsN: row.attemptsN,
     lastSeenAt: row.lastSeenAt
   }));
+}
+
+function resolvePublicWikiPageCitations(
+  db: Database.Database,
+  pageId: number,
+  rawCitations: string
+): PublicWikiPageCitation[] {
+  const citationIds = parseCitationIds(pageId, rawCitations);
+
+  return citationIds.map((chunkId) => {
+    const citation = db
+      .prepare(
+        `SELECT
+           chunks.id AS chunkId,
+           chunks.text,
+           sources.title AS sourceTitle,
+           sources.doc_ref AS docRef,
+           sources.adapter_id AS adapterId
+         FROM chunks
+         INNER JOIN sources ON sources.id = chunks.source_id
+         WHERE chunks.id = ?`
+      )
+      .get(chunkId) as PublicWikiPageCitationRow | undefined;
+
+    if (citation === undefined) {
+      throw new Error(`Public wiki page ${pageId} cites missing chunk ${chunkId}`);
+    }
+
+    return {
+      chunkId: citation.chunkId,
+      text: citation.text,
+      sourceTitle: citation.sourceTitle,
+      docRef: citation.docRef,
+      adapterId: citation.adapterId
+    };
+  });
+}
+
+function parseCitationIds(pageId: number, rawCitations: string): number[] {
+  const parsed = JSON.parse(rawCitations) as unknown;
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Public wiki page ${pageId} citations must be a JSON array`);
+  }
+
+  return parsed.map((citationId) => {
+    if (!Number.isSafeInteger(citationId) || citationId <= 0) {
+      throw new Error(`Public wiki page ${pageId} contains an invalid citation id`);
+    }
+
+    return citationId;
+  });
+}
+
+function parsePageId(pageId: string | number): number | null {
+  if (typeof pageId === "number") {
+    return Number.isSafeInteger(pageId) && pageId > 0 ? pageId : null;
+  }
+
+  if (!/^[1-9]\d*$/.test(pageId)) {
+    return null;
+  }
+
+  const parsedPageId = Number(pageId);
+  return Number.isSafeInteger(parsedPageId) ? parsedPageId : null;
 }
 
 function openRuntimeDb(): Database.Database {

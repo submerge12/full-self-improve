@@ -15,7 +15,9 @@ export default function PublicWikiPage() {
           {pages.map((page) => (
             <li key={page.id}>
               <article>
-                <h2>{page.conceptName}</h2>
+                <h2>
+                  <a href={`/wiki/${page.id}`}>{page.conceptName}</a>
+                </h2>
                 <p>{page.excerpt}</p>
                 <p>Version {page.version}</p>
               </article>

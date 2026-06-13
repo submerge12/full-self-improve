@@ -1,0 +1,85 @@
+{
+  "contractStatus": "inferred_live_smoke_pending",
+  "requiredConsecutiveDays": 2,
+  "boardPublishConfig": "config/multica/board-publish.example.json",
+  "smokeMode": "offline-contract-only",
+  "evidence": {
+    "days": [
+      {
+        "date": "2026-06-14",
+        "items": [
+          {
+            "role": "librarian",
+            "phase": "nightly-ingest",
+            "actionType": "add_comment",
+            "title": "Librarian ingest report for 2026-06-14",
+            "requiredSourceEndpoints": ["POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault"],
+            "requiredBoardEvidence": ["commentUrl", "sourceLinks", "conceptCounts"]
+          },
+          {
+            "role": "scholar",
+            "phase": "morning-plan",
+            "actionType": "create_task",
+            "title": "Scholar study plan for 2026-06-14",
+            "requiredSourceEndpoints": ["GET http://127.0.0.1:3000/api/plan/today"],
+            "requiredBoardEvidence": ["taskUrl", "checklist", "sourceLinks"]
+          },
+          {
+            "role": "nutritionist",
+            "phase": "daily-meals",
+            "actionType": "create_task",
+            "title": "Nutrition plan for 2026-06-14",
+            "requiredSourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-14"],
+            "requiredBoardEvidence": ["taskUrl", "mealChecklist", "sourceLinks"]
+          },
+          {
+            "role": "scholar",
+            "phase": "evening-mastery",
+            "actionType": "add_comment",
+            "title": "Scholar mastery report for 2026-06-14",
+            "requiredSourceEndpoints": ["GET http://127.0.0.1:3000/api/mastery/summary"],
+            "requiredBoardEvidence": ["commentUrl", "masteryDelta", "sourceLinks"]
+          }
+        ]
+      },
+      {
+        "date": "2026-06-15",
+        "items": [
+          {
+            "role": "librarian",
+            "phase": "nightly-ingest",
+            "actionType": "add_comment",
+            "title": "Librarian ingest report for 2026-06-15",
+            "requiredSourceEndpoints": ["POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault"],
+            "requiredBoardEvidence": ["commentUrl", "sourceLinks", "conceptCounts"]
+          },
+          {
+            "role": "scholar",
+            "phase": "morning-plan",
+            "actionType": "create_task",
+            "title": "Scholar study plan for 2026-06-15",
+            "requiredSourceEndpoints": ["GET http://127.0.0.1:3000/api/plan/today"],
+            "requiredBoardEvidence": ["taskUrl", "checklist", "sourceLinks"]
+          },
+          {
+            "role": "nutritionist",
+            "phase": "daily-meals",
+            "actionType": "create_task",
+            "title": "Nutrition plan for 2026-06-15",
+            "requiredSourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-15"],
+            "requiredBoardEvidence": ["taskUrl", "mealChecklist", "sourceLinks"]
+          },
+          {
+            "role": "scholar",
+            "phase": "evening-mastery",
+            "actionType": "add_comment",
+            "title": "Scholar mastery report for 2026-06-15",
+            "requiredSourceEndpoints": ["GET http://127.0.0.1:3000/api/mastery/summary"],
+            "requiredBoardEvidence": ["commentUrl", "masteryDelta", "sourceLinks"]
+          }
+        ]
+      }
+    ]
+  },
+  "nonCompletionNotice": "This manifest is an offline live-smoke contract. It does not execute Multica, install a scheduler, prove live board posting, or close M2."
+}

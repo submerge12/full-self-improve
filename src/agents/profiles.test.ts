@@ -110,6 +110,24 @@ describe("M2 agent and Multica config examples", () => {
     expect(JSON.stringify(config)).not.toMatch(/api[_-]?key|bearer|token|secret|cookie/iu);
   });
 
+  test("Multica live-smoke manifest example stays offline and secret-free", async () => {
+    const manifest = JSON.parse(await readProjectFile("config/multica/live-smoke.example.json")) as {
+      contractStatus: string;
+      requiredConsecutiveDays: number;
+      smokeMode: string;
+      boardPublishConfig: string;
+      nonCompletionNotice: string;
+    };
+
+    expect(manifest.contractStatus).toBe("inferred_live_smoke_pending");
+    expect(manifest.requiredConsecutiveDays).toBe(2);
+    expect(manifest.smokeMode).toBe("offline-contract-only");
+    expect(manifest.boardPublishConfig).toBe("config/multica/board-publish.example.json");
+    expect(manifest.nonCompletionNotice).toContain("does not execute Multica");
+    expect(JSON.stringify(manifest)).not.toMatch(/[A-Z]:[\\/]/u);
+    expect(JSON.stringify(manifest)).not.toMatch(/api[_-]?key|bearer|token|secret|cookie/iu);
+  });
+
   test("Multica self-host env example keeps secrets empty", async () => {
     const envExample = await readProjectFile("config/multica/selfhost.env.example");
 

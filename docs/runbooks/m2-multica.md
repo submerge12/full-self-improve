@@ -83,6 +83,12 @@ npm run kl -- agent-schedule --dry-run `
 
 This prints whether the daily `agent-day` run is due, the local board-day window, the exact dry-run `agent-day` argv the scheduler would invoke, and the embedded dry-run day plan. It does not start a timer, call Multica, call compass-health, or prove the M2 two-day hands-free requirement.
 
+## Offline Live-Smoke Manifest
+
+Use `config/multica/live-smoke.example.json` as the pre-live board-day contract. It defines the two consecutive board days and the required evidence for each M2 item: Librarian ingest comment, Scholar morning study task, Nutritionist meal task, and Scholar evening mastery comment.
+
+The manifest is offline-only and keeps `contractStatus` at `inferred_live_smoke_pending`. It validates what the future live smoke must prove, but it does not call Multica, install a scheduler, prove live board posting, or close M2.
+
 ## Live Gate
 
 Before enabling live publish, verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.

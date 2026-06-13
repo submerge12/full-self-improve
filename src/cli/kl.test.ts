@@ -16,6 +16,7 @@ import {
   type KlAgentDayLiveCommandResult,
   type KlAgentDryRunCommandResult,
   type KlAgentLiveSmokeDryRunCommandResult,
+  type KlAgentPreflightDryRunCommandResult,
   type KlAgentScheduleDryRunCommandResult,
   type KlCommandResult,
   type KlPersistentQuizCommandResult,
@@ -413,7 +414,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight/
     );
   });
 
@@ -908,6 +909,138 @@ describe("kl CLI handler", () => {
         "2026-06-14"
       ])
     ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
+  });
+
+  test("agent-preflight dry-run combines schedule intent and live-smoke validation without fetching", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "agent-preflight",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--manifest",
+        "config/multica/live-smoke.example.json",
+        "--config",
+        "config/agents.example.json"
+      ],
+      {
+        stdout: stdout.sink,
+        async fetch() {
+          throw new Error("preflight dry-run must not fetch");
+        }
+      }
+    )) as KlAgentPreflightDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-preflight",
+      mode: "dry-run",
+      result: {
+        status: "ready_for_live_smoke",
+        date: "2026-06-14",
+        nonCompletionNotice:
+          "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.",
+        schedule: {
+          due: true,
+          date: "2026-06-14",
+          wouldRun: {
+            command: "agent-day",
+            mode: "dry-run"
+          },
+          plan: {
+            mode: "dry-run",
+            externalWrites: []
+          }
+        },
+        liveSmoke: {
+          manifestPath: "config/multica/live-smoke.example.json",
+          valid: true,
+          manifestEvidenceDays: ["2026-06-14", "2026-06-15"],
+          validation: {
+            errors: []
+          }
+        }
+      }
+    });
+    expect(result.result.offlineChecks).toEqual([
+      expect.objectContaining({ id: "scheduler_due", status: "passed" }),
+      expect.objectContaining({ id: "live_smoke_manifest_valid", status: "passed" }),
+      expect.objectContaining({ id: "manifest_starts_on_schedule_date", status: "passed" })
+    ]);
+    expect(result.result.requiredLiveProofs.map((proof) => proof.id)).toEqual([
+      "multica_self_host_verified",
+      "pi_harness_dependency_clean",
+      "two_consecutive_hands_free_board_days",
+      "failure_blocker_board_comment",
+      "evening_mastery_delta_matches_api",
+      "daily_cost_visible"
+    ]);
+    expect(result.result.requiredLiveProofs.every((proof) => proof.status === "not_verified_offline")).toBe(true);
+  });
+
+  test("agent-preflight blocks when the manifest first day differs from the scheduler date", async () => {
+    const result = (await handleKlCommand([
+      "agent-preflight",
+      "--dry-run",
+      "--now",
+      "2026-06-15T07:30:00+08:00",
+      "--timezone",
+      "Asia/Shanghai",
+      "--daily-at",
+      "07:30",
+      "--manifest",
+      "config/multica/live-smoke.example.json",
+      "--config",
+      "config/agents.example.json"
+    ])) as KlAgentPreflightDryRunCommandResult;
+
+    expect(result.result.status).toBe("blocked");
+    expect(result.result.date).toBe("2026-06-15");
+    expect(result.result.liveSmoke.valid).toBe(true);
+    expect(result.result.offlineChecks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "manifest_starts_on_schedule_date",
+          status: "blocked",
+          detail: "Manifest first evidence day 2026-06-14 must match scheduler date 2026-06-15."
+        })
+      ])
+    );
+  });
+
+  test("agent-preflight command validates dry-run mode and rejects live mode", async () => {
+    await expect(
+      handleKlCommand([
+        "agent-preflight",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])
+    ).rejects.toThrow(/supports only --dry-run/);
+    await expect(
+      handleKlCommand([
+        "agent-preflight",
+        "--live",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])
+    ).rejects.toThrow(/Unknown option for agent-preflight: --live/);
   });
 
   test("with API key env vars deleted, CLI mock persistent flow runs ingest, plan, quiz, teachback, diagnose, and trace against one DB", async () => {

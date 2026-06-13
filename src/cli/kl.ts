@@ -26,7 +26,8 @@ import {
   createAgentScheduleReport,
   createAgentScheduleTiming,
   type AgentScheduleDryRunReport,
-  type AgentScheduleArgvOptions
+  type AgentScheduleArgvOptions,
+  type AgentScheduleTiming
 } from "../agents/schedule.js";
 import { validateLiveSmokeManifest, type LiveSmokeManifestValidationResult } from "../agents/live-smoke-manifest.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
@@ -191,6 +192,51 @@ export interface KlAgentLiveSmokeDryRunCommandResult {
 
 export type KlAgentLiveSmokeCommandResult = KlAgentLiveSmokeDryRunCommandResult;
 
+type KlAgentPreflightStatus = "ready_for_live_smoke" | "blocked";
+type KlAgentPreflightCheckStatus = "passed" | "blocked";
+type KlAgentPreflightLiveProofStatus = "not_verified_offline";
+
+export interface KlAgentPreflightOfflineCheck {
+  readonly id: "scheduler_due" | "live_smoke_manifest_valid" | "manifest_starts_on_schedule_date";
+  readonly status: KlAgentPreflightCheckStatus;
+  readonly detail: string;
+}
+
+export interface KlAgentPreflightRequiredLiveProof {
+  readonly id:
+    | "multica_self_host_verified"
+    | "pi_harness_dependency_clean"
+    | "two_consecutive_hands_free_board_days"
+    | "failure_blocker_board_comment"
+    | "evening_mastery_delta_matches_api"
+    | "daily_cost_visible";
+  readonly status: KlAgentPreflightLiveProofStatus;
+  readonly detail: string;
+}
+
+export interface KlAgentPreflightDryRunResult {
+  readonly date: string;
+  readonly status: KlAgentPreflightStatus;
+  readonly nonCompletionNotice: string;
+  readonly offlineChecks: readonly KlAgentPreflightOfflineCheck[];
+  readonly requiredLiveProofs: readonly KlAgentPreflightRequiredLiveProof[];
+  readonly schedule: AgentScheduleDryRunReport;
+  readonly liveSmoke: {
+    readonly manifestPath: string;
+    readonly valid: boolean;
+    readonly manifestEvidenceDays: readonly string[];
+    readonly validation: LiveSmokeManifestValidationResult;
+  };
+}
+
+export interface KlAgentPreflightDryRunCommandResult {
+  command: "agent-preflight";
+  mode: "dry-run";
+  result: KlAgentPreflightDryRunResult;
+}
+
+export type KlAgentPreflightCommandResult = KlAgentPreflightDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -201,7 +247,8 @@ export type KlCommandResult =
   | KlAgentCommandResult
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
-  | KlAgentLiveSmokeCommandResult;
+  | KlAgentLiveSmokeCommandResult
+  | KlAgentPreflightCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -250,8 +297,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentLiveSmokeCommand(args);
   }
 
+  if (command === "agent-preflight") {
+    return runAgentPreflightCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight.`
   );
 }
 
@@ -263,6 +314,40 @@ export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO =
 
 const DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE =
   "This offline validation does not execute Multica, install a scheduler, prove live board posting, or close M2.";
+const DEFAULT_PREFLIGHT_NON_COMPLETION_NOTICE =
+  "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.";
+const M2_REQUIRED_LIVE_PROOFS = [
+  {
+    id: "multica_self_host_verified",
+    status: "not_verified_offline",
+    detail: "Verify a running Multica self-host instance from its unmodified repository."
+  },
+  {
+    id: "pi_harness_dependency_clean",
+    status: "not_verified_offline",
+    detail: "Verify pi-harness is consumed externally and its checkout stays clean."
+  },
+  {
+    id: "two_consecutive_hands_free_board_days",
+    status: "not_verified_offline",
+    detail: "Capture two consecutive board days produced by agents without manual prompting."
+  },
+  {
+    id: "failure_blocker_board_comment",
+    status: "not_verified_offline",
+    detail: "Kill the knowledge-loop API mid-run and capture the visible Multica blocker."
+  },
+  {
+    id: "evening_mastery_delta_matches_api",
+    status: "not_verified_offline",
+    detail: "Compare the evening Scholar board post with GET /api/mastery/summary."
+  },
+  {
+    id: "daily_cost_visible",
+    status: "not_verified_offline",
+    detail: "Surface per-agent daily cost in the live report."
+  }
+] as const satisfies readonly KlAgentPreflightRequiredLiveProof[];
 
 async function runIngestCommand(args: readonly string[]): Promise<KlIngestCommandResult> {
   const options = parseOptions(args, new Set(["--vault", "--db"]), "ingest");
@@ -595,6 +680,61 @@ function runAgentLiveSmokeCommand(args: readonly string[]): KlAgentLiveSmokeComm
   };
 }
 
+function runAgentPreflightCommand(args: readonly string[]): KlAgentPreflightCommandResult {
+  const { dryRun, options } = parseAgentPreflightOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-preflight supports only --dry-run.");
+  }
+
+  const timing = createAgentScheduleTiming({
+    now: requireOne(options, "--now", "agent-preflight"),
+    timezone: requireOne(options, "--timezone", "agent-preflight"),
+    dailyAt: requireOne(options, "--daily-at", "agent-preflight")
+  });
+  const config = loadOptionalAgentConfig(options, "agent-preflight");
+  const argvOptions = agentScheduleArgvOptions(options, "agent-preflight");
+  const plan = createAgentDayDryRunPlan(
+    agentDayInputFromConfig({
+      config,
+      overrides: agentDryRunOverrides(options, "agent-preflight"),
+      date: timing.date
+    })
+  );
+  const schedule = createAgentScheduleReport({
+    timing,
+    plan,
+    argvOptions
+  });
+  const manifestPath = requireOne(options, "--manifest", "agent-preflight");
+  const { manifest, relativePath } = loadLiveSmokeManifest(manifestPath);
+  const validation = validateLiveSmokeManifest(manifest, plan);
+  const manifestEvidenceDays = readManifestEvidenceDays(manifest);
+  const offlineChecks = createPreflightChecks({
+    timing,
+    liveSmokeValid: validation.errors.length === 0,
+    manifestEvidenceDays
+  });
+
+  return {
+    command: "agent-preflight",
+    mode: "dry-run",
+    result: {
+      date: timing.date,
+      status: offlineChecks.every((check) => check.status === "passed") ? "ready_for_live_smoke" : "blocked",
+      nonCompletionNotice: DEFAULT_PREFLIGHT_NON_COMPLETION_NOTICE,
+      offlineChecks,
+      requiredLiveProofs: M2_REQUIRED_LIVE_PROOFS,
+      schedule,
+      liveSmoke: {
+        manifestPath: relativePath,
+        valid: validation.errors.length === 0,
+        manifestEvidenceDays,
+        validation
+      }
+    }
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -695,6 +835,24 @@ function parseAgentLiveSmokeOptions(args: readonly string[]): { dryRun: boolean;
   );
 }
 
+function parseAgentPreflightOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(
+    args,
+    new Set([
+      "--now",
+      "--timezone",
+      "--daily-at",
+      "--manifest",
+      "--knowledge-loop-url",
+      "--compass-health-url",
+      "--adapter",
+      "--board",
+      "--config"
+    ]),
+    "agent-preflight"
+  );
+}
+
 function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {
   const configPath = optionalOne(options, "--config", command);
 
@@ -734,6 +892,48 @@ function readManifestNotice(value: unknown): string {
   }
 
   return DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE;
+}
+
+function readManifestEvidenceDays(value: unknown): readonly string[] {
+  if (!isRecord(value) || !isRecord(value.evidence) || !Array.isArray(value.evidence.days)) {
+    return [];
+  }
+
+  return value.evidence.days.flatMap((day) => (isRecord(day) && typeof day.date === "string" ? [day.date] : []));
+}
+
+function createPreflightChecks(input: {
+  readonly timing: AgentScheduleTiming;
+  readonly liveSmokeValid: boolean;
+  readonly manifestEvidenceDays: readonly string[];
+}): readonly KlAgentPreflightOfflineCheck[] {
+  const firstManifestDay = input.manifestEvidenceDays[0];
+  const manifestAligned = firstManifestDay === input.timing.date;
+
+  return [
+    {
+      id: "scheduler_due",
+      status: input.timing.due ? "passed" : "blocked",
+      detail: input.timing.due
+        ? `Scheduler is due for ${input.timing.date}.`
+        : `Scheduler is not yet due for ${input.timing.date}.`
+    },
+    {
+      id: "live_smoke_manifest_valid",
+      status: input.liveSmokeValid ? "passed" : "blocked",
+      detail: input.liveSmokeValid ? "Live-smoke manifest validation passed." : "Live-smoke manifest has errors."
+    },
+    {
+      id: "manifest_starts_on_schedule_date",
+      status: manifestAligned ? "passed" : "blocked",
+      detail:
+        firstManifestDay === undefined
+          ? `Manifest has no evidence day to match scheduler date ${input.timing.date}.`
+          : manifestAligned
+            ? `Manifest first evidence day matches scheduler date ${input.timing.date}.`
+            : `Manifest first evidence day ${firstManifestDay} must match scheduler date ${input.timing.date}.`
+    }
+  ];
 }
 
 function agentDryRunOverrides(options: Map<string, string[]>, command: string): AgentDryRunDefaults {

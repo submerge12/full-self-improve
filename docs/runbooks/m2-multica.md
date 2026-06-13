@@ -104,6 +104,23 @@ This is a manifest-validation dry run only. It reads the manifest inside this ch
 
 A passing result means the checked-in manifest still describes the offline board-day contract for the requested date. It does not execute Multica, install a scheduler, prove live board posting, prove two consecutive hands-free days, or close M2.
 
+## Offline Preflight Report
+
+Before attempting a live smoke, run the offline preflight report to confirm the scheduler dry-run date and the manifest's first evidence day are aligned:
+
+```powershell
+npm run kl -- agent-preflight --dry-run `
+  --now 2026-06-14T07:30:00+08:00 `
+  --timezone Asia/Shanghai `
+  --daily-at 07:30 `
+  --manifest config/multica/live-smoke.example.json `
+  --config config/agents.example.json
+```
+
+The report embeds the scheduler dry-run output, the live-smoke manifest validation result, deterministic offline checks, and the M2 live proofs that remain `not_verified_offline`. It must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not install a scheduler, must not touch the Multica or pi-harness checkouts, and must not accept `--live`.
+
+`ready_for_live_smoke` means only that the offline scheduler intent and manifest contract are internally aligned for the selected board date. It does not execute Multica, prove live board posting, prove two consecutive hands-free days, verify failure blockers, verify evening mastery deltas, surface live daily cost, or close M2.
+
 ## Live Gate
 
 Before enabling live publish, verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.

@@ -13,6 +13,7 @@ export interface PiHarnessDependencyInput {
   readonly packageJson: unknown;
   readonly distFiles: PiHarnessDistFiles;
   readonly gitStatusShort: string;
+  readonly runtimeImport?: PiHarnessRuntimeImportReport;
 }
 
 export interface PiHarnessDependencyCheck {
@@ -25,7 +26,9 @@ export interface PiHarnessDependencyCheck {
     | "cli_bin_exists"
     | "dist_cli_types_exists"
     | "new_agent_script"
-    | "git_status_clean";
+    | "git_status_clean"
+    | "runtime_root_import"
+    | "runtime_cli_import";
   readonly status: PiHarnessDependencyCheckStatus;
   readonly detail: string;
 }
@@ -43,11 +46,35 @@ export interface PiHarnessDependencyReport {
   readonly package: PiHarnessPackageSummary;
   readonly checks: readonly PiHarnessDependencyCheck[];
   readonly gitStatusEntryCount: number;
+  readonly runtimeImport?: PiHarnessRuntimeImportReport;
   readonly nonCompletionNotice: string;
+}
+
+export interface PiHarnessRuntimeImportInput {
+  readonly packageName: "pi-harness";
+  readonly importer?: PiHarnessModuleImporter;
+}
+
+export type PiHarnessModuleImporter = (specifier: string) => Promise<unknown>;
+
+export interface PiHarnessRuntimeModuleReport {
+  readonly specifier: string;
+  readonly status: PiHarnessDependencyCheckStatus;
+  readonly detail: string;
+  readonly requiredExports: readonly string[];
+  readonly observedExports: readonly string[];
+}
+
+export interface PiHarnessRuntimeImportReport {
+  readonly packageName: "pi-harness";
+  readonly root: PiHarnessRuntimeModuleReport;
+  readonly cli: PiHarnessRuntimeModuleReport;
 }
 
 const NON_COMPLETION_NOTICE =
   "This pi-harness dependency preflight is read-only. It does not install or link pi-harness, does not run scaffolding, does not modify the pi-harness checkout, and does not close M2.";
+const ROOT_RUNTIME_EXPORTS = ["CostTracker", "createGenericHarness"] as const;
+const CLI_RUNTIME_EXPORTS = ["parseCliArgs", "formatCliHelp"] as const;
 
 export function validatePiHarnessDependency(input: PiHarnessDependencyInput): PiHarnessDependencyReport {
   const manifest = recordOrEmpty(input.packageJson);
@@ -72,13 +99,36 @@ export function validatePiHarnessDependency(input: PiHarnessDependencyInput): Pi
     ),
     check(gitStatusShort.length === 0, "git_status_clean", gitStatusDetail(gitStatusShort))
   ];
+  if (input.runtimeImport !== undefined) {
+    checks.push(
+      check(
+        input.runtimeImport.root.status === "passed",
+        "runtime_root_import",
+        input.runtimeImport.root.detail
+      ),
+      check(input.runtimeImport.cli.status === "passed", "runtime_cli_import", input.runtimeImport.cli.detail)
+    );
+  }
 
   return {
     status: checks.every((entry) => entry.status === "passed") ? "ready_for_live_dependency_proof" : "blocked",
     package: summary,
     checks,
     gitStatusEntryCount: gitStatusShort.length,
+    ...(input.runtimeImport === undefined ? {} : { runtimeImport: input.runtimeImport }),
     nonCompletionNotice: NON_COMPLETION_NOTICE
+  };
+}
+
+export async function inspectPiHarnessRuntimeImport(
+  input: PiHarnessRuntimeImportInput
+): Promise<PiHarnessRuntimeImportReport> {
+  const importer = input.importer ?? defaultImporter;
+
+  return {
+    packageName: input.packageName,
+    root: await inspectRuntimeModule(importer, input.packageName, ROOT_RUNTIME_EXPORTS),
+    cli: await inspectRuntimeModule(importer, `${input.packageName}/cli`, CLI_RUNTIME_EXPORTS)
   };
 }
 
@@ -138,6 +188,41 @@ function parseGitStatus(value: string): string[] {
 
 function gitStatusDetail(entries: readonly string[]): string {
   return entries.length === 0 ? "pi-harness checkout is clean." : `pi-harness checkout has ${entries.length} git status entries.`;
+}
+
+async function inspectRuntimeModule(
+  importer: PiHarnessModuleImporter,
+  specifier: string,
+  requiredExports: readonly string[]
+): Promise<PiHarnessRuntimeModuleReport> {
+  try {
+    const module = recordOrUndefined(await importer(specifier));
+    const observedExports = module === undefined ? [] : Object.keys(module).sort();
+    const missingExports = requiredExports.filter((name) => typeof module?.[name] !== "function");
+
+    return {
+      specifier,
+      status: missingExports.length === 0 ? "passed" : "blocked",
+      detail:
+        missingExports.length === 0
+          ? `${specifier} runtime import exposes required exports.`
+          : `${specifier} runtime import is missing required exports: ${missingExports.join(", ")}.`,
+      requiredExports,
+      observedExports
+    };
+  } catch {
+    return {
+      specifier,
+      status: "blocked",
+      detail: `${specifier} runtime import failed; pi-harness is not linked or installed in this environment.`,
+      requiredExports,
+      observedExports: []
+    };
+  }
+}
+
+async function defaultImporter(specifier: string): Promise<unknown> {
+  return import(specifier);
 }
 
 function nonEmpty(value: string | undefined): boolean {

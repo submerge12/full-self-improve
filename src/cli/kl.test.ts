@@ -1047,6 +1047,102 @@ describe("kl CLI handler", () => {
     expect(JSON.stringify(result)).not.toContain("private-key.pem");
   });
 
+  test("agent-harness-dependency can verify linked pi-harness runtime imports", async () => {
+    const harnessRoot = path.join(tmpdir(), "pi-harness-fixture");
+    const importedSpecifiers: string[] = [];
+    const result = (await handleKlCommand(
+      ["agent-harness-dependency", "--dry-run", "--harness-path", harnessRoot, "--runtime-package", "pi-harness"],
+      {
+        execFile() {
+          return "";
+        },
+        async importModule(specifier) {
+          importedSpecifiers.push(specifier);
+          if (specifier === "pi-harness") {
+            return {
+              CostTracker: class CostTracker {},
+              createGenericHarness() {
+                return {};
+              }
+            };
+          }
+          if (specifier === "pi-harness/cli") {
+            return {
+              parseCliArgs() {
+                return {};
+              },
+              formatCliHelp() {
+                return "help";
+              }
+            };
+          }
+          throw new Error(`unexpected import: ${specifier}`);
+        },
+        fileSystem: {
+          readJson() {
+            return piHarnessPackageJson();
+          },
+          isFile() {
+            return true;
+          }
+        }
+      }
+    )) as KlAgentHarnessDependencyDryRunCommandResult;
+
+    expect(importedSpecifiers).toEqual(["pi-harness", "pi-harness/cli"]);
+    expect(result.result.status).toBe("ready_for_live_dependency_proof");
+    expect(result.result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "runtime_root_import", status: "passed" }),
+        expect.objectContaining({ id: "runtime_cli_import", status: "passed" })
+      ])
+    );
+    expect(result.result.runtimeImport).toMatchObject({
+      packageName: "pi-harness",
+      root: {
+        specifier: "pi-harness",
+        status: "passed"
+      },
+      cli: {
+        specifier: "pi-harness/cli",
+        status: "passed"
+      }
+    });
+  });
+
+  test("agent-harness-dependency blocks and redacts failed pi-harness runtime imports", async () => {
+    const harnessRoot = path.join(tmpdir(), "pi-harness-fixture");
+    const result = (await handleKlCommand(
+      ["agent-harness-dependency", "--dry-run", "--harness-path", harnessRoot, "--runtime-package", "pi-harness"],
+      {
+        execFile() {
+          return "";
+        },
+        async importModule(specifier) {
+          throw new Error(`Cannot find ${specifier} from ${path.join(harnessRoot, "node_modules")}`);
+        },
+        fileSystem: {
+          readJson() {
+            return piHarnessPackageJson();
+          },
+          isFile() {
+            return true;
+          }
+        }
+      }
+    )) as KlAgentHarnessDependencyDryRunCommandResult;
+
+    expect(result.result.status).toBe("blocked");
+    expect(result.result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "runtime_root_import", status: "blocked" }),
+        expect.objectContaining({ id: "runtime_cli_import", status: "blocked" })
+      ])
+    );
+    expect(JSON.stringify(result)).not.toContain(harnessRoot);
+    expect(JSON.stringify(result)).toContain("pi-harness runtime import failed");
+  });
+
   test("agent-harness-dependency blocks when an expected dist path is not a file", async () => {
     const harnessRoot = path.join(tmpdir(), "pi-harness-fixture");
     const result = (await handleKlCommand(
@@ -1126,6 +1222,16 @@ describe("kl CLI handler", () => {
     await expect(
       handleKlCommand(["agent-harness-dependency", "--dry-run", "--harness-path", "G:\\pi-harness", "--live", "1"])
     ).rejects.toThrow(/Unknown option for agent-harness-dependency: --live/);
+    await expect(
+      handleKlCommand([
+        "agent-harness-dependency",
+        "--dry-run",
+        "--harness-path",
+        "G:\\pi-harness",
+        "--runtime-package",
+        "file:///G:/pi-harness/dist/index.js"
+      ])
+    ).rejects.toThrow(/only supports --runtime-package pi-harness/);
   });
 
   test("agent-live-smoke dry-run validates the checked-in manifest without fetching", async () => {

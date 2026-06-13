@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 
-import { validatePiHarnessDependency } from "./pi-harness-dependency.js";
+import { inspectPiHarnessRuntimeImport, validatePiHarnessDependency } from "./pi-harness-dependency.js";
 
 describe("pi-harness dependency preflight", () => {
   test("passes when package metadata dist files and git status are clean", () => {
@@ -169,6 +169,105 @@ describe("pi-harness dependency preflight", () => {
         status: "blocked"
       })
     );
+  });
+
+  test("passes runtime import checks when pi-harness modules expose required symbols", async () => {
+    const runtimeImport = await inspectPiHarnessRuntimeImport({
+      packageName: "pi-harness",
+      async importer(specifier) {
+        if (specifier === "pi-harness") {
+          return {
+            CostTracker: class CostTracker {},
+            createGenericHarness() {
+              return {};
+            }
+          };
+        }
+        if (specifier === "pi-harness/cli") {
+          return {
+            parseCliArgs() {
+              return {};
+            },
+            formatCliHelp() {
+              return "help";
+            }
+          };
+        }
+        throw new Error(`unexpected import: ${specifier}`);
+      }
+    });
+    const result = validatePiHarnessDependency({
+      packageJson: packageJson(),
+      distFiles: {
+        main: true,
+        types: true,
+        cli: true,
+        cliTypes: true,
+        newAgentScript: true
+      },
+      gitStatusShort: "",
+      runtimeImport
+    });
+
+    expect(result.status).toBe("ready_for_live_dependency_proof");
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "runtime_root_import", status: "passed" }),
+        expect.objectContaining({ id: "runtime_cli_import", status: "passed" })
+      ])
+    );
+    expect(result.runtimeImport?.root.observedExports).toEqual(["CostTracker", "createGenericHarness"]);
+    expect(result.runtimeImport?.cli.observedExports).toEqual(["formatCliHelp", "parseCliArgs"]);
+  });
+
+  test("blocks runtime import checks when linked pi-harness modules are unavailable", async () => {
+    const runtimeImport = await inspectPiHarnessRuntimeImport({
+      packageName: "pi-harness",
+      async importer(specifier) {
+        throw new Error(`Cannot find module '${specifier}' from G:\\secret\\node_modules`);
+      }
+    });
+    const result = validatePiHarnessDependency({
+      packageJson: packageJson(),
+      distFiles: {
+        main: true,
+        types: true,
+        cli: true,
+        cliTypes: true,
+        newAgentScript: true
+      },
+      gitStatusShort: "",
+      runtimeImport
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: "runtime_root_import", status: "blocked" }),
+        expect.objectContaining({ id: "runtime_cli_import", status: "blocked" })
+      ])
+    );
+    expect(JSON.stringify(result)).not.toContain("G:\\secret");
+  });
+
+  test("blocks runtime import checks when required public symbols are missing", async () => {
+    const runtimeImport = await inspectPiHarnessRuntimeImport({
+      packageName: "pi-harness",
+      async importer(specifier) {
+        return specifier === "pi-harness" ? { CostTracker: class CostTracker {} } : { parseCliArgs() {} };
+      }
+    });
+
+    expect(runtimeImport.root).toMatchObject({
+      specifier: "pi-harness",
+      status: "blocked",
+      detail: "pi-harness runtime import is missing required exports: createGenericHarness."
+    });
+    expect(runtimeImport.cli).toMatchObject({
+      specifier: "pi-harness/cli",
+      status: "blocked",
+      detail: "pi-harness/cli runtime import is missing required exports: formatCliHelp."
+    });
   });
 });
 

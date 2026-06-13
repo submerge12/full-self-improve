@@ -47,7 +47,12 @@ import {
   type AgentFailureSmokeEndpointSelector,
   type AgentFailureSmokeReport
 } from "../agents/failure-smoke.js";
-import { validatePiHarnessDependency, type PiHarnessDependencyReport } from "../agents/pi-harness-dependency.js";
+import {
+  inspectPiHarnessRuntimeImport,
+  validatePiHarnessDependency,
+  type PiHarnessDependencyReport,
+  type PiHarnessModuleImporter
+} from "../agents/pi-harness-dependency.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -89,6 +94,7 @@ export interface KlHandlerIO {
   fetch?: AgentFetch;
   env?: Readonly<Record<string, string | undefined>>;
   execFile?: (file: string, args: readonly string[]) => string;
+  importModule?: PiHarnessModuleImporter;
   fileSystem?: {
     readJson(filePath: string): unknown;
     isFile(filePath: string): boolean;
@@ -940,18 +946,26 @@ async function runAgentFailureSmokeCommand(args: readonly string[]): Promise<KlA
   };
 }
 
-function runAgentHarnessDependencyCommand(
+async function runAgentHarnessDependencyCommand(
   args: readonly string[],
   io: KlHandlerIO
-): KlAgentHarnessDependencyCommandResult {
+): Promise<KlAgentHarnessDependencyCommandResult> {
   const { dryRun, options } = parseAgentHarnessDependencyOptions(args);
   if (!dryRun) {
     throw new UsageError("Command agent-harness-dependency supports only --dry-run.");
   }
 
   const harnessPath = path.resolve(requireOne(options, "--harness-path", "agent-harness-dependency"));
+  const runtimePackage = optionalOne(options, "--runtime-package", "agent-harness-dependency");
   const fileSystem = io.fileSystem ?? defaultFileSystem;
   const execFile = io.execFile ?? defaultExecFile;
+  const runtimeImport =
+    runtimePackage === undefined
+      ? undefined
+      : await inspectPiHarnessRuntimeImport({
+          packageName: parsePiHarnessRuntimePackage(runtimePackage),
+          ...(io.importModule === undefined ? {} : { importer: io.importModule })
+        });
   const packageJson = readHarnessPackageJson(fileSystem, harnessPath);
   const result = validatePiHarnessDependency({
     packageJson,
@@ -962,7 +976,8 @@ function runAgentHarnessDependencyCommand(
       cliTypes: fileSystem.isFile(path.join(harnessPath, "dist", "cli", "index.d.ts")),
       newAgentScript: fileSystem.isFile(path.join(harnessPath, "scripts", "new-agent.mjs"))
     },
-    gitStatusShort: readHarnessGitStatus(execFile, harnessPath)
+    gitStatusShort: readHarnessGitStatus(execFile, harnessPath),
+    ...(runtimeImport === undefined ? {} : { runtimeImport })
   });
 
   return {
@@ -1156,7 +1171,7 @@ function parseAgentFailureSmokeOptions(args: readonly string[]): { dryRun: boole
 function parseAgentHarnessDependencyOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
   return parseFlaggedOptions(
     args,
-    new Set(["--harness-path"]),
+    new Set(["--harness-path", "--runtime-package"]),
     "agent-harness-dependency"
   );
 }
@@ -1469,6 +1484,14 @@ function parseTraceStage(value: string): TraceStage {
   }
 
   throw new UsageError(`Invalid --stage value "${value}". Expected one of: ${TRACE_STAGES.join(", ")}.`);
+}
+
+function parsePiHarnessRuntimePackage(value: string): "pi-harness" {
+  if (value === "pi-harness") {
+    return value;
+  }
+
+  throw new UsageError("Command agent-harness-dependency only supports --runtime-package pi-harness.");
 }
 
 function requireOne(options: Map<string, string[]>, name: string, command: string): string {

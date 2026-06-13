@@ -169,6 +169,16 @@ npm run kl -- agent-harness-dependency --dry-run --harness-path G:\pi-harness
 
 This checks the external package metadata, required `dist` entry files, CLI bin target, scaffolding script presence, and `git --no-optional-locks -C <path> status --short` for the pi-harness checkout. Required paths must be files, not directories. It does not install, link, import, run scaffolding, or modify `G:\pi-harness`. A blocked result means the dependency proof is not ready; the default report redacts the external path and reports only the dirty entry count rather than raw filenames, and read/git inspection failures use sanitized errors.
 
+After the live environment has linked or installed `pi-harness`, add the explicit runtime import proof:
+
+```powershell
+npm run kl -- agent-harness-dependency --dry-run `
+  --harness-path G:\pi-harness `
+  --runtime-package pi-harness
+```
+
+The runtime proof dynamically imports only the fixed package specifiers `pi-harness` and `pi-harness/cli`, then verifies the public runtime symbols needed by the agent bridge. This keeps `package.json` clean-clone safe: do not commit a local `file:` dependency to `G:\pi-harness`. A passing runtime import still does not close M2 unless the external pi-harness checkout is clean and the remaining live board-day proofs pass.
+
 ## Offline Board-Day Evidence Validation
 
 After real board observations are captured, validate the evidence file against the live-smoke manifest:

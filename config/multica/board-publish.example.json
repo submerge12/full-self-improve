@@ -1,0 +1,29 @@
+{
+  "contractStatus": "inferred_live_smoke_pending",
+  "apiBaseUrl": "http://127.0.0.1:8080",
+  "appBaseUrl": "http://127.0.0.1:3000",
+  "workspace": {
+    "slug": "daily-plan",
+    "id": ""
+  },
+  "actions": {
+    "create_task": {
+      "method": "POST",
+      "endpointUrl": "http://127.0.0.1:8080/api/issues",
+      "payload": {
+        "title": "$action.title",
+        "description": "$action.body",
+        "status": "todo",
+        "priority": "normal"
+      }
+    },
+    "add_comment": {
+      "method": "POST",
+      "endpointTemplate": "http://127.0.0.1:8080/api/issues/{issueId}/comments",
+      "payload": {
+        "content": "$action.body",
+        "type": "comment"
+      }
+    }
+  }
+}

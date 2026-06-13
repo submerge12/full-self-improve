@@ -1,0 +1,20 @@
+{
+  "knowledgeLoopBaseUrl": "http://127.0.0.1:3000",
+  "compassHealthBaseUrl": "http://127.0.0.1:8000",
+  "adapterId": "holly-vault",
+  "multicaBoard": "daily-plan",
+  "roles": {
+    "librarian": {
+      "dryRun": true,
+      "phases": ["nightly-ingest"]
+    },
+    "scholar": {
+      "dryRun": true,
+      "phases": ["morning-plan", "evening-mastery"]
+    },
+    "nutritionist": {
+      "dryRun": true,
+      "phases": ["daily-meals"]
+    }
+  }
+}

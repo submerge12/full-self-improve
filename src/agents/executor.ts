@@ -1,15 +1,10 @@
-import type {
-  AgentDayDryRunPlan,
-  AgentDryRunPlan,
-  AgentEndpointPlan,
-  AgentIntendedAction
-} from "./dry-run.js";
+import type { AgentDryRunPlan, AgentEndpointPlan, AgentIntendedAction } from "./dry-run.js";
 import { redactEndpointReference, redactText } from "./http-clients.js";
 
 export type AgentExecutionMode = "dry-run" | "live";
 export type AgentExecutionStatus = "planned" | "completed" | "blocked";
 
-export type ExecutableAgentPlan = AgentDryRunPlan | AgentDayDryRunPlan;
+export type ExecutableAgentPlan = AgentDryRunPlan;
 
 export interface AgentReadResult {
   readonly endpoint: AgentEndpointPlan;
@@ -23,11 +18,17 @@ export interface AgentPublishResult {
   readonly url?: string;
 }
 
+export interface AgentPublishFailure {
+  readonly action: AgentIntendedAction;
+  readonly message: string;
+}
+
 export interface AgentExecutionResult {
   readonly mode: AgentExecutionMode;
   readonly status: AgentExecutionStatus;
   readonly reads: readonly AgentReadResult[];
   readonly publishedActions: readonly AgentPublishResult[];
+  readonly publishFailures: readonly AgentPublishFailure[];
   readonly blocker?: AgentIntendedAction;
 }
 
@@ -54,7 +55,8 @@ export async function executeAgentPlan(
       mode,
       status: "planned",
       reads: [],
-      publishedActions: []
+      publishedActions: [],
+      publishFailures: []
     };
   }
 
@@ -67,13 +69,20 @@ export async function executeAgentPlan(
       reads.push(await readClient.read(endpoint));
     } catch (error) {
       const blocker = createAgentBlockerAction(plan, endpoint, error);
-      const publishedBlocker = await boardClient.publish(blocker);
+      let publishedBlocker: AgentPublishResult | undefined;
+      let publishFailure: AgentPublishFailure | undefined;
+      try {
+        publishedBlocker = await boardClient.publish(blocker);
+      } catch (publishError) {
+        publishFailure = createPublishFailure(blocker, publishError, "Agent blocker publish failed");
+      }
 
       return {
         mode,
         status: "blocked",
         reads,
-        publishedActions: [publishedBlocker],
+        publishedActions: publishedBlocker === undefined ? [] : [publishedBlocker],
+        publishFailures: publishFailure === undefined ? [] : [publishFailure],
         blocker
       };
     }
@@ -81,19 +90,52 @@ export async function executeAgentPlan(
 
   const publishedActions: AgentPublishResult[] = [];
   for (const action of plan.intendedActions) {
-    publishedActions.push(await boardClient.publish(action));
+    try {
+      publishedActions.push(await boardClient.publish(action));
+    } catch (error) {
+      return {
+        mode,
+        status: "blocked",
+        reads,
+        publishedActions,
+        publishFailures: [createPublishFailure(action, error, "Agent action publish failed")]
+      };
+    }
   }
 
   return {
     mode,
     status: "completed",
     reads,
-    publishedActions
+    publishedActions,
+    publishFailures: []
+  };
+}
+
+function createPublishFailure(
+  action: AgentIntendedAction,
+  error: unknown,
+  prefix: "Agent action publish failed" | "Agent blocker publish failed"
+): AgentPublishFailure {
+  return {
+    action: redactedAction(action),
+    message: `${prefix}: ${redactText(errorMessage(error))}`
+  };
+}
+
+function redactedAction(action: AgentIntendedAction): AgentIntendedAction {
+  return {
+    target: action.target,
+    type: action.type,
+    title: redactText(action.title),
+    body: redactText(action.body),
+    checklist: action.checklist.map((item) => redactText(item)),
+    sourceEndpoints: action.sourceEndpoints.map((endpoint) => redactEndpointReference(endpoint))
   };
 }
 
 export function createAgentBlockerAction(
-  plan: ExecutableAgentPlan,
+  plan: AgentDryRunPlan,
   endpoint: AgentEndpointPlan,
   error: unknown
 ): AgentIntendedAction {
@@ -113,6 +155,10 @@ export function createAgentBlockerAction(
     checklist: ["Inspect source endpoint", "Restore the source system", "Rerun the agent after the blocker is resolved"],
     sourceEndpoints: [sourceEndpoint]
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function requireClient<T>(client: T | undefined, name: string): T {

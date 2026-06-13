@@ -68,9 +68,12 @@ export function redactText(value: string, secrets: readonly string[] = []): stri
     /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|auth|session|sid)\s*[:=]\s*)[^\s;,)&]+/giu,
     "$1REDACTED"
   );
+  redacted = redacted.replace(/\b[A-Z]:[\\/][^\s;,)]*/giu, "PATH_REDACTED");
+  redacted = redacted.replace(/\bfile:\/\/\/?[^\s;,)]*/giu, "PATH_REDACTED");
+  redacted = redacted.replace(/(^|[\s([])\/(?!\/)[^\s;,)]*/gu, "$1PATH_REDACTED");
 
   return redacted.replace(
-    /([?&][^=\s&]*(?:token|key|secret|authorization|auth|cookie)[^=\s&]*=)[^\s&]+/giu,
+    /([?&][^=\s&]*(?:token|key|secret|authorization|auth|cookie|session|sid|password)[^=\s&]*=)[^\s&]+/giu,
     "$1REDACTED"
   );
 }
@@ -280,7 +283,7 @@ function assertHttpUrl(value: string): void {
 }
 
 function isSensitiveQueryKey(value: string): boolean {
-  return /token|key|secret|authorization|auth|cookie/iu.test(value);
+  return /token|key|secret|authorization|auth|cookie|session|sid|password/iu.test(value);
 }
 
 function isJsonResponse(response: Response): boolean {

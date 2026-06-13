@@ -2,7 +2,12 @@ import { describe, expect, test } from "vitest";
 
 import { createAgentDryRunPlan, type AgentIntendedAction } from "./dry-run.js";
 import { executeAgentPlan } from "./executor.js";
-import { createFetchAgentReadClient, createHttpBoardClient } from "./http-clients.js";
+import {
+  createFetchAgentReadClient,
+  createHttpBoardClient,
+  redactEndpointReference,
+  redactText
+} from "./http-clients.js";
 
 interface FetchCall {
   readonly input: string | URL | Request;
@@ -365,5 +370,84 @@ describe("agent HTTP clients", () => {
     expect(publishedActions[0]?.body).toContain("Cookie: REDACTED");
     expect(publishedActions[0]?.body).toContain("api_key=REDACTED");
     expect(publishedActions[0]?.body).toContain("secret=REDACTED");
+  });
+
+  test("redacts board-visible text secrets and filesystem paths", () => {
+    const cases = [
+      { input: "Authorization: Bearer real-token", leak: "real-token", expected: "Authorization: Bearer REDACTED" },
+      { input: "Cookie: sid=real-cookie", leak: "real-cookie", expected: "Cookie: REDACTED" },
+      { input: "api_key=real-key", leak: "real-key", expected: "api_key=REDACTED" },
+      { input: "token=real-token", leak: "real-token", expected: "token=REDACTED" },
+      { input: "secret=real-secret", leak: "real-secret", expected: "secret=REDACTED" },
+      { input: "sid=real-session", leak: "real-session", expected: "sid=REDACTED" },
+      { input: "G:\\pi-harness\\secret.log", leak: "G:\\pi-harness", expected: "PATH_REDACTED" },
+      { input: "/home/holly/pi-harness/secret.log", leak: "/home/holly", expected: "PATH_REDACTED" },
+      { input: "file:///G:/pi-harness/secret.log", leak: "G:/pi-harness", expected: "PATH_REDACTED" }
+    ];
+
+    for (const { input, leak, expected } of cases) {
+      const redacted = redactText(`Reason: ${input}`);
+
+      expect(redacted).toContain(expected);
+      expect(redacted).not.toContain(leak);
+    }
+  });
+
+  test("redacts board source endpoint secrets and filesystem paths", () => {
+    const cases = [
+      {
+        input: "GET http://127.0.0.1:3000/api/plan/today?Authorization=Bearer%20real-token",
+        leak: "real-token",
+        expected: "Authorization=REDACTED"
+      },
+      {
+        input: "GET http://127.0.0.1:3000/api/plan/today?Cookie=sid-real-cookie",
+        leak: "sid-real-cookie",
+        expected: "Cookie=REDACTED"
+      },
+      {
+        input: "GET http://127.0.0.1:3000/api/plan/today?api_key=real-key",
+        leak: "real-key",
+        expected: "api_key=REDACTED"
+      },
+      {
+        input: "GET http://127.0.0.1:3000/api/plan/today?token=real-token",
+        leak: "real-token",
+        expected: "token=REDACTED"
+      },
+      {
+        input: "GET http://127.0.0.1:3000/api/plan/today?secret=real-secret",
+        leak: "real-secret",
+        expected: "secret=REDACTED"
+      },
+      {
+        input: "GET http://127.0.0.1:3000/api/plan/today?sid=real-session",
+        leak: "real-session",
+        expected: "sid=REDACTED"
+      },
+      {
+        input: "GET G:\\pi-harness\\secret.log?token=real-token",
+        leak: "G:\\pi-harness",
+        expected: "PATH_REDACTED"
+      },
+      {
+        input: "GET /home/holly/pi-harness/secret.log?token=real-token",
+        leak: "/home/holly",
+        expected: "PATH_REDACTED"
+      },
+      {
+        input: "GET file:///G:/pi-harness/secret.log?token=real-token",
+        leak: "G:/pi-harness",
+        expected: "PATH_REDACTED"
+      }
+    ];
+
+    for (const { input, leak, expected } of cases) {
+      const redacted = redactEndpointReference(input);
+
+      expect(redacted).toContain(expected);
+      expect(redacted).not.toContain(leak);
+      expect(redacted).not.toContain("real-token");
+    }
   });
 });

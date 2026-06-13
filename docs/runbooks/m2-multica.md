@@ -147,6 +147,12 @@ By default, this fails the Scholar morning-plan read for `/api/plan/today`, veri
 
 This command must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not kill a real service, must not publish board items, must not touch the Multica or pi-harness checkouts, and must not accept `--live`. A passing result is only an offline simulation of the blocker path; it does not prove the required live kill-API drill, live board blocker visibility, or M2 completion.
 
+## Evening Mastery Report Rendering
+
+The live Scholar evening phase reads the exact `GET /api/mastery/summary` endpoint and renders the returned `routeId: "mastery.summary"` API success body into the Multica comment body before publishing. The rendered body includes the date, source endpoint, mastery row count, weak-spot count, top weak spot score, diagnosis run id, and row details.
+
+This renderer is deterministic and redaction-safe, but it does not call the API itself and does not prove the live evening board post. If the mastery summary body is malformed, unwrapped, or from a lookalike endpoint, the live runner publishes a blocker instead of a static or mismatched mastery report. The M2 live gate still requires comparing the captured evening Scholar board comment against the live `GET /api/mastery/summary` response.
+
 ## Offline Board-Day Evidence Validation
 
 After real board observations are captured, validate the evidence file against the live-smoke manifest:

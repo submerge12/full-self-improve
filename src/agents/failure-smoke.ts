@@ -120,10 +120,39 @@ function createFakeReadClient(failedEndpointKey: string, simulatedError: Error, 
       return {
         endpoint: sanitizeEndpoint(endpoint),
         status: 200,
-        body: { ok: true }
+        body: successfulFakeBodyFor(endpoint)
       };
     }
   };
+}
+
+function successfulFakeBodyFor(endpoint: AgentEndpointPlan): Record<string, unknown> {
+  if (isMasterySummaryEndpoint(endpoint)) {
+    return {
+      ok: true,
+      routeId: "mastery.summary",
+      data: {
+        masteryRows: [],
+        diagnosis: {
+          weakSpots: []
+        }
+      }
+    };
+  }
+
+  return { ok: true };
+}
+
+function isMasterySummaryEndpoint(endpoint: AgentEndpointPlan): boolean {
+  if (endpoint.method !== "GET") {
+    return false;
+  }
+
+  try {
+    return new URL(endpoint.url).pathname === "/api/mastery/summary";
+  } catch {
+    return false;
+  }
 }
 
 function createFakeBoardClient(events: string[]): AgentBoardClient {

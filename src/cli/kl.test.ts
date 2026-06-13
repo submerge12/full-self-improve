@@ -73,6 +73,23 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
+function successfulApiBodyForUrl(url: string): Record<string, unknown> {
+  if (new URL(url).pathname === "/api/mastery/summary") {
+    return {
+      ok: true,
+      routeId: "mastery.summary",
+      data: {
+        masteryRows: [],
+        diagnosis: {
+          weakSpots: []
+        }
+      }
+    };
+  }
+
+  return { ok: true, url };
+}
+
 type CountableTable =
   | "schema_migrations"
   | "sources"
@@ -595,7 +612,7 @@ describe("kl CLI handler", () => {
             });
           }
 
-          return jsonResponse({ ok: true, url });
+          return jsonResponse(successfulApiBodyForUrl(url));
         }
       }
     )) as KlAgentDayLiveCommandResult;

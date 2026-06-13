@@ -1,5 +1,6 @@
 import type { AgentDryRunPlan, AgentEndpointPlan, AgentIntendedAction } from "./dry-run.js";
 import { redactEndpointReference, redactText } from "./http-clients.js";
+import { renderScholarMasteryReportBody } from "./mastery-report.js";
 
 export type AgentExecutionMode = "dry-run" | "live";
 export type AgentExecutionStatus = "planned" | "completed" | "blocked";
@@ -88,8 +89,35 @@ export async function executeAgentPlan(
     }
   }
 
+  let actionsToPublish: readonly AgentIntendedAction[];
+  try {
+    actionsToPublish = actionsForPublish(plan, reads);
+  } catch (error) {
+    const endpoint = masterySummaryRead(reads)?.endpoint ?? plan.externalReads[0];
+    if (endpoint === undefined) {
+      throw error;
+    }
+    const blocker = createAgentBlockerAction(plan, endpoint, error);
+    let publishedBlocker: AgentPublishResult | undefined;
+    let publishFailure: AgentPublishFailure | undefined;
+    try {
+      publishedBlocker = await boardClient.publish(blocker);
+    } catch (publishError) {
+      publishFailure = createPublishFailure(blocker, publishError, "Agent blocker publish failed");
+    }
+
+    return {
+      mode,
+      status: "blocked",
+      reads,
+      publishedActions: publishedBlocker === undefined ? [] : [publishedBlocker],
+      publishFailures: publishFailure === undefined ? [] : [publishFailure],
+      blocker
+    };
+  }
+
   const publishedActions: AgentPublishResult[] = [];
-  for (const action of plan.intendedActions) {
+  for (const action of actionsToPublish) {
     try {
       publishedActions.push(await boardClient.publish(action));
     } catch (error) {
@@ -110,6 +138,45 @@ export async function executeAgentPlan(
     publishedActions,
     publishFailures: []
   };
+}
+
+function actionsForPublish(plan: AgentDryRunPlan, reads: readonly AgentReadResult[]): readonly AgentIntendedAction[] {
+  if (plan.role !== "scholar" || plan.phase !== "evening-mastery") {
+    return plan.intendedActions;
+  }
+
+  const masteryRead = masterySummaryRead(reads);
+  if (masteryRead === undefined) {
+    return plan.intendedActions;
+  }
+
+  return plan.intendedActions.map((action) =>
+    action.type === "add_comment"
+      ? {
+          ...action,
+          body: renderScholarMasteryReportBody(masteryRead.body, {
+            date: plan.date,
+            sourceEndpointLabel: `${masteryRead.endpoint.method} ${masteryRead.endpoint.url}`
+          })
+        }
+      : action
+  );
+}
+
+function masterySummaryRead(reads: readonly AgentReadResult[]): AgentReadResult | undefined {
+  return reads.find((read) => isMasterySummaryEndpoint(read.endpoint));
+}
+
+function isMasterySummaryEndpoint(endpoint: AgentEndpointPlan): boolean {
+  if (endpoint.method !== "GET") {
+    return false;
+  }
+
+  try {
+    return new URL(endpoint.url).pathname === "/api/mastery/summary";
+  } catch {
+    return false;
+  }
 }
 
 function createPublishFailure(

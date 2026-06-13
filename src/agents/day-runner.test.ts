@@ -66,7 +66,7 @@ describe("agent day runner", () => {
         async read(endpoint) {
           reads.push(endpoint);
           events.push(`read:${endpoint.method} ${endpoint.url}`);
-          return { endpoint, status: 200, body: { ok: true, url: endpoint.url } };
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
         }
       },
       boardClient: {
@@ -125,7 +125,7 @@ describe("agent day runner", () => {
             throw new Error(`Authorization: Bearer ${secret} at G:\\pi-harness\\secret.log`);
           }
 
-          return { endpoint, status: 200, body: { ok: true } };
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
         }
       },
       boardClient: {
@@ -175,7 +175,7 @@ describe("agent day runner", () => {
             throw new Error(`Authorization: Bearer ${readSecret} at /home/holly/pi-harness/secret.log`);
           }
 
-          return { endpoint, status: 200, body: { ok: true } };
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
         }
       },
       boardClient: {
@@ -227,7 +227,7 @@ describe("agent day runner", () => {
     const report = await executeAgentDay(plan, "live", {
       readClient: {
         async read(endpoint) {
-          return { endpoint, status: 200, body: { ok: true } };
+          return { endpoint, status: 200, body: successfulReadBodyFor(endpoint) };
         }
       },
       boardClient: {
@@ -268,3 +268,20 @@ describe("agent day runner", () => {
     ]);
   });
 });
+
+function successfulReadBodyFor(endpoint: AgentEndpointPlan): Record<string, unknown> {
+  if (new URL(endpoint.url).pathname === "/api/mastery/summary") {
+    return {
+      ok: true,
+      routeId: "mastery.summary",
+      data: {
+        masteryRows: [],
+        diagnosis: {
+          weakSpots: []
+        }
+      }
+    };
+  }
+
+  return { ok: true, url: endpoint.url };
+}

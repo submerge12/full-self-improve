@@ -35,6 +35,11 @@ import {
   validateBoardPublishConfig,
   type BoardPublishConfigValidationResult
 } from "../agents/board-publish-config.js";
+import {
+  BOARD_DAY_EVIDENCE_OFFLINE_WARNING,
+  validateBoardDayEvidence,
+  type BoardDayEvidenceValidationResult
+} from "../agents/board-day-evidence.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -257,6 +262,25 @@ export interface KlAgentBoardConfigDryRunCommandResult {
 
 export type KlAgentBoardConfigCommandResult = KlAgentBoardConfigDryRunCommandResult;
 
+type KlAgentBoardEvidenceStatus = "observed_evidence_valid" | "blocked";
+
+export interface KlAgentBoardEvidenceDryRunResult {
+  readonly evidencePath: string;
+  readonly manifestPath: string;
+  readonly status: KlAgentBoardEvidenceStatus;
+  readonly valid: boolean;
+  readonly validation: BoardDayEvidenceValidationResult;
+  readonly nonCompletionNotice: string;
+}
+
+export interface KlAgentBoardEvidenceDryRunCommandResult {
+  command: "agent-board-evidence";
+  mode: "dry-run";
+  result: KlAgentBoardEvidenceDryRunResult;
+}
+
+export type KlAgentBoardEvidenceCommandResult = KlAgentBoardEvidenceDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -269,7 +293,8 @@ export type KlCommandResult =
   | KlAgentScheduleCommandResult
   | KlAgentLiveSmokeCommandResult
   | KlAgentPreflightCommandResult
-  | KlAgentBoardConfigCommandResult;
+  | KlAgentBoardConfigCommandResult
+  | KlAgentBoardEvidenceCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -326,8 +351,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentBoardConfigCommand(args);
   }
 
+  if (command === "agent-board-evidence") {
+    return runAgentBoardEvidenceCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence.`
   );
 }
 
@@ -343,6 +372,8 @@ const DEFAULT_PREFLIGHT_NON_COMPLETION_NOTICE =
   "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.";
 const DEFAULT_BOARD_CONFIG_NON_COMPLETION_NOTICE =
   "This board publish config validation is offline-only. It does not call Multica, prove the board contract, prove live posting, or close M2.";
+const DEFAULT_BOARD_EVIDENCE_NON_COMPLETION_NOTICE =
+  "This board-day evidence validation is offline-only. It does not call Multica, prove hands-free execution, prove live posting, or close M2.";
 const M2_REQUIRED_LIVE_PROOFS = [
   {
     id: "multica_self_host_verified",
@@ -798,6 +829,47 @@ function runAgentBoardConfigCommand(args: readonly string[]): KlAgentBoardConfig
   };
 }
 
+function runAgentBoardEvidenceCommand(args: readonly string[]): KlAgentBoardEvidenceCommandResult {
+  const { dryRun, options } = parseAgentBoardEvidenceOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-board-evidence supports only --dry-run.");
+  }
+
+  const evidencePath = requireOne(options, "--evidence", "agent-board-evidence");
+  const manifestPath = requireOne(options, "--manifest", "agent-board-evidence");
+  const {
+    value: manifest,
+    relativePath: manifestRelativePath,
+    errors: manifestErrors
+  } = loadCheckoutJsonForValidation(manifestPath, "Live smoke manifest");
+  const { value: evidence, relativePath: evidenceRelativePath, errors } = loadCheckoutJsonForValidation(
+    evidencePath,
+    "Board-day evidence"
+  );
+  const loadErrors = [...manifestErrors, ...errors];
+  const validation =
+    loadErrors.length === 0
+      ? validateBoardDayEvidence(evidence, manifest)
+      : {
+          errors: loadErrors,
+          warnings: [BOARD_DAY_EVIDENCE_OFFLINE_WARNING]
+        };
+  const valid = validation.errors.length === 0;
+
+  return {
+    command: "agent-board-evidence",
+    mode: "dry-run",
+    result: {
+      evidencePath: evidenceRelativePath,
+      manifestPath: manifestRelativePath,
+      status: valid ? "observed_evidence_valid" : "blocked",
+      valid,
+      validation,
+      nonCompletionNotice: DEFAULT_BOARD_EVIDENCE_NON_COMPLETION_NOTICE
+    }
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -918,6 +990,10 @@ function parseAgentPreflightOptions(args: readonly string[]): { dryRun: boolean;
 
 function parseAgentBoardConfigOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
   return parseFlaggedOptions(args, new Set(["--config"]), "agent-board-config");
+}
+
+function parseAgentBoardEvidenceOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(args, new Set(["--evidence", "--manifest"]), "agent-board-evidence");
 }
 
 function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {

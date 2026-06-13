@@ -134,6 +134,22 @@ The report embeds the scheduler dry-run output, the live-smoke manifest validati
 
 `ready_for_live_smoke` means only that the offline scheduler intent and manifest contract are internally aligned for the selected board date. It does not execute Multica, prove live board posting, prove two consecutive hands-free days, verify failure blockers, verify evening mastery deltas, surface live daily cost, or close M2.
 
+## Offline Board-Day Evidence Validation
+
+After real board observations are captured, validate the evidence file against the live-smoke manifest:
+
+```powershell
+npm run kl -- agent-board-evidence --dry-run `
+  --evidence config/multica/board-day-evidence.example.json `
+  --manifest config/multica/live-smoke.example.json
+```
+
+This command checks only the structure of an observed board-day evidence file. It reads the evidence and manifest inside this checkout, confirms the two observed days and board items align to the manifest, and rejects secret-like values, filesystem paths, fake completion fields, and URL credentials. It must not fetch Multica, read bearer tokens, publish board items, read or write the Multica or pi-harness checkouts, or accept `--live`.
+
+A passing result means the evidence file is shaped for later human/live verification. It does not prove hands-free execution, prove live board posting, verify Multica availability, satisfy the two-day requirement, or close M2.
+
 ## Live Gate
 
 Before enabling live publish, require passing `agent-live-smoke --dry-run`, `agent-board-config --dry-run`, and `agent-preflight --dry-run`; then verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.
+
+After live board observations are captured, run `agent-board-evidence --dry-run` against the captured evidence file. That validation is a post-observation shape check, not a pre-live gate and not an M2 completion claim.

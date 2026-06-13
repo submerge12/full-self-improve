@@ -14,6 +14,7 @@ import {
   handleKlCommand,
   type KlAgentDayDryRunCommandResult,
   type KlAgentDayLiveCommandResult,
+  type KlAgentBoardEvidenceDryRunCommandResult,
   type KlAgentBoardConfigDryRunCommandResult,
   type KlAgentDryRunCommandResult,
   type KlAgentLiveSmokeDryRunCommandResult,
@@ -415,7 +416,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence/
     );
   });
 
@@ -1373,6 +1374,199 @@ describe("kl CLI handler", () => {
       ]);
     } finally {
       unlinkIfExists(configPath);
+    }
+  });
+
+  test("agent-board-evidence dry-run validates observed board evidence without fetching", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "agent-board-evidence",
+        "--dry-run",
+        "--evidence",
+        "config/multica/board-day-evidence.example.json",
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ],
+      {
+        stdout: stdout.sink,
+        async fetch() {
+          throw new Error("board evidence dry-run must not fetch");
+        }
+      }
+    )) as KlAgentBoardEvidenceDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toEqual({
+      command: "agent-board-evidence",
+      mode: "dry-run",
+      result: {
+        evidencePath: "config/multica/board-day-evidence.example.json",
+        manifestPath: "config/multica/live-smoke.example.json",
+        status: "observed_evidence_valid",
+        valid: true,
+        validation: {
+          errors: [],
+          warnings: [
+            "board-day evidence is offline observed evidence only; it does not prove hands-free execution or close M2."
+          ],
+          summary: {
+            contractStatus: "observed_live_smoke_pending_verification",
+            evidenceMode: "offline-observation-only",
+            requiredDays: 2,
+            observedItems: [
+              "2026-06-14 librarian:nightly-ingest:add_comment",
+              "2026-06-14 scholar:morning-plan:create_task",
+              "2026-06-14 nutritionist:daily-meals:create_task",
+              "2026-06-14 scholar:evening-mastery:add_comment",
+              "2026-06-15 librarian:nightly-ingest:add_comment",
+              "2026-06-15 scholar:morning-plan:create_task",
+              "2026-06-15 nutritionist:daily-meals:create_task",
+              "2026-06-15 scholar:evening-mastery:add_comment"
+            ]
+          }
+        },
+        nonCompletionNotice:
+          "This board-day evidence validation is offline-only. It does not call Multica, prove hands-free execution, prove live posting, or close M2."
+      }
+    });
+  });
+
+  test("agent-board-evidence dry-run returns validation errors for unsafe evidence", async () => {
+    const evidencePath = path.join("config", "multica", "board-day-evidence.invalid.test.json");
+    writeFileSync(
+      evidencePath,
+      JSON.stringify(
+        {
+          contractStatus: "verified",
+          evidenceMode: "offline-observation-only",
+          status: "completed",
+          m2Closed: true,
+          days: []
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-evidence",
+        "--dry-run",
+        "--evidence",
+        evidencePath,
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])) as KlAgentBoardEvidenceDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(
+        expect.arrayContaining([
+          "board-day evidence contractStatus must remain observed_live_smoke_pending_verification.",
+          "board-day evidence must not contain fake closure status at status.",
+          "board-day evidence must not contain fake closure field m2Closed.",
+          "board-day evidence days length must match manifest requiredConsecutiveDays."
+        ])
+      );
+    } finally {
+      unlinkIfExists(evidencePath);
+    }
+  });
+
+  test("agent-board-evidence command validates dry-run mode and checkout paths", async () => {
+    await expect(
+      handleKlCommand([
+        "agent-board-evidence",
+        "--evidence",
+        "config/multica/board-day-evidence.example.json",
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])
+    ).rejects.toThrow(/supports only --dry-run/);
+    await expect(
+      handleKlCommand([
+        "agent-board-evidence",
+        "--live",
+        "--evidence",
+        "config/multica/board-day-evidence.example.json",
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])
+    ).rejects.toThrow(/Unknown option for agent-board-evidence: --live/);
+    await expect(
+      handleKlCommand([
+        "agent-board-evidence",
+        "--dry-run",
+        "--evidence",
+        path.join("..", "board-day-evidence.json"),
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])
+    ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
+    await expect(
+      handleKlCommand([
+        "agent-board-evidence",
+        "--dry-run",
+        "--evidence",
+        "config/multica/board-day-evidence.example.json",
+        "--manifest",
+        path.join("..", "live-smoke.json")
+      ])
+    ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
+  });
+
+  test("agent-board-evidence command returns validation errors for malformed evidence JSON", async () => {
+    const evidencePath = path.join("config", "multica", "board-day-evidence.malformed.test.json");
+    writeFileSync(evidencePath, "{\n  \"contractStatus\":\n", "utf8");
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-evidence",
+        "--dry-run",
+        "--evidence",
+        evidencePath,
+        "--manifest",
+        "config/multica/live-smoke.example.json"
+      ])) as KlAgentBoardEvidenceDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(expect.arrayContaining([expect.stringContaining("JSON")]));
+      expect(result.result.validation.warnings).toEqual([
+        "board-day evidence is offline observed evidence only; it does not prove hands-free execution or close M2."
+      ]);
+    } finally {
+      unlinkIfExists(evidencePath);
+    }
+  });
+
+  test("agent-board-evidence command returns validation errors for malformed manifest JSON", async () => {
+    const manifestPath = path.join("config", "multica", "live-smoke.malformed.test.json");
+    writeFileSync(manifestPath, "{\n  \"requiredConsecutiveDays\":\n", "utf8");
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-board-evidence",
+        "--dry-run",
+        "--evidence",
+        "config/multica/board-day-evidence.example.json",
+        "--manifest",
+        manifestPath
+      ])) as KlAgentBoardEvidenceDryRunCommandResult;
+
+      expect(result.result.valid).toBe(false);
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.validation.summary).toBeUndefined();
+      expect(result.result.validation.errors).toEqual(expect.arrayContaining([expect.stringContaining("JSON")]));
+      expect(result.result.validation.warnings).toEqual([
+        "board-day evidence is offline observed evidence only; it does not prove hands-free execution or close M2."
+      ]);
+    } finally {
+      unlinkIfExists(manifestPath);
     }
   });
 

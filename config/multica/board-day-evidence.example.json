@@ -1,0 +1,133 @@
+{
+  "contractStatus": "observed_live_smoke_pending_verification",
+  "evidenceMode": "offline-observation-only",
+  "days": [
+    {
+      "date": "2026-06-14",
+      "items": [
+        {
+          "role": "librarian",
+          "phase": "nightly-ingest",
+          "actionType": "add_comment",
+          "title": "Librarian ingest report for 2026-06-14",
+          "sourceEndpoints": ["POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault"],
+          "boardEvidence": {
+            "commentUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1001#comment-2001",
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/ingest/2026-06-14"],
+            "conceptCounts": {
+              "created": 3,
+              "updated": 5
+            },
+            "capturedAt": "2026-06-14T23:05:00Z"
+          }
+        },
+        {
+          "role": "scholar",
+          "phase": "morning-plan",
+          "actionType": "create_task",
+          "title": "Scholar study plan for 2026-06-14",
+          "sourceEndpoints": ["GET http://127.0.0.1:3000/api/plan/today"],
+          "boardEvidence": {
+            "taskUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1002",
+            "checklist": ["Review active sources", "Complete recall block", "Log mastery deltas"],
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/plan/2026-06-14"],
+            "capturedAt": "2026-06-14T08:10:00Z"
+          }
+        },
+        {
+          "role": "nutritionist",
+          "phase": "daily-meals",
+          "actionType": "create_task",
+          "title": "Nutrition plan for 2026-06-14",
+          "sourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-14"],
+          "boardEvidence": {
+            "taskUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1003",
+            "mealChecklist": ["Breakfast logged", "Lunch planned", "Dinner planned", "Hydration checked"],
+            "sourceLinks": ["https://compass-health.example.invalid/meal-plan/2026-06-14"],
+            "capturedAt": "2026-06-14T08:20:00Z"
+          }
+        },
+        {
+          "role": "scholar",
+          "phase": "evening-mastery",
+          "actionType": "add_comment",
+          "title": "Scholar mastery report for 2026-06-14",
+          "sourceEndpoints": ["GET http://127.0.0.1:3000/api/mastery/summary"],
+          "boardEvidence": {
+            "commentUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1002#comment-2002",
+            "masteryDelta": {
+              "reviewed": 12,
+              "improved": 4
+            },
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/mastery/2026-06-14"],
+            "capturedAt": "2026-06-14T21:30:00Z"
+          }
+        }
+      ]
+    },
+    {
+      "date": "2026-06-15",
+      "items": [
+        {
+          "role": "librarian",
+          "phase": "nightly-ingest",
+          "actionType": "add_comment",
+          "title": "Librarian ingest report for 2026-06-15",
+          "sourceEndpoints": ["POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault"],
+          "boardEvidence": {
+            "commentUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1011#comment-2011",
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/ingest/2026-06-15"],
+            "conceptCounts": {
+              "created": 2,
+              "updated": 6
+            },
+            "capturedAt": "2026-06-15T23:05:00Z"
+          }
+        },
+        {
+          "role": "scholar",
+          "phase": "morning-plan",
+          "actionType": "create_task",
+          "title": "Scholar study plan for 2026-06-15",
+          "sourceEndpoints": ["GET http://127.0.0.1:3000/api/plan/today"],
+          "boardEvidence": {
+            "taskUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1012",
+            "checklist": ["Review active sources", "Complete recall block", "Log mastery deltas"],
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/plan/2026-06-15"],
+            "capturedAt": "2026-06-15T08:10:00Z"
+          }
+        },
+        {
+          "role": "nutritionist",
+          "phase": "daily-meals",
+          "actionType": "create_task",
+          "title": "Nutrition plan for 2026-06-15",
+          "sourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-15"],
+          "boardEvidence": {
+            "taskUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1013",
+            "mealChecklist": ["Breakfast logged", "Lunch planned", "Dinner planned", "Hydration checked"],
+            "sourceLinks": ["https://compass-health.example.invalid/meal-plan/2026-06-15"],
+            "capturedAt": "2026-06-15T08:20:00Z"
+          }
+        },
+        {
+          "role": "scholar",
+          "phase": "evening-mastery",
+          "actionType": "add_comment",
+          "title": "Scholar mastery report for 2026-06-15",
+          "sourceEndpoints": ["GET http://127.0.0.1:3000/api/mastery/summary"],
+          "boardEvidence": {
+            "commentUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1012#comment-2012",
+            "masteryDelta": {
+              "reviewed": 10,
+              "improved": 3
+            },
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/mastery/2026-06-15"],
+            "capturedAt": "2026-06-15T21:30:00Z"
+          }
+        }
+      ]
+    }
+  ],
+  "nonCompletionNotice": "This file is offline observation evidence pending verification. It does not prove hands-free execution, complete M2, or close the Multica board-day requirement."
+}

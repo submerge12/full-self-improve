@@ -1,12 +1,12 @@
 import type Database from "better-sqlite3";
 
-import { recordMasteryUpdate, type MasteryRecord } from "../db/content-store.js";
 import {
   gradeQuizAttempt,
   type ExactAnswerSpec,
   type QuizGradeResult,
   type QuizVerdict
 } from "./mock-commands.js";
+import { recordPersistentMasteryUpdate, type MasteryRecord } from "./persistent-mastery.js";
 import { createTraceRecorder, type TraceEvent, type TraceRecorder } from "./trace.js";
 
 export interface GradePersistentExactQuizAttemptInput {
@@ -71,16 +71,14 @@ export function gradePersistentExactQuizAttempt(
     });
     const attemptId = insertAttempt(db, itemId, input.response, quizGrade);
     const nextScore = clampUnitInterval(currentMasteryScore(db, concept.id) + quizGrade.masteryDelta);
-    const mastery = recordMasteryUpdate(
-      db,
-      {
-        conceptId: concept.id,
-        score: nextScore,
-        confidence: 1,
-        lastSeenAt: input.lastSeenAt
-      },
-      { traceRecorder: trace, runId }
-    );
+    const mastery = recordPersistentMasteryUpdate(db, {
+      conceptId: concept.id,
+      score: nextScore,
+      confidence: 1,
+      lastSeenAt: input.lastSeenAt,
+      trace,
+      runId
+    });
 
     return {
       runId,

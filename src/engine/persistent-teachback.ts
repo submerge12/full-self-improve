@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-import { recordMasteryUpdate, type MasteryRecord } from "../db/content-store.js";
+import { recordPersistentMasteryUpdate, type MasteryRecord } from "./persistent-mastery.js";
 import { createTraceRecorder, type TraceEvent, type TraceRecorder } from "./trace.js";
 
 export interface GradePersistentTeachbackInput {
@@ -109,16 +109,14 @@ function updateTeachbackMastery(
   nextScore: number,
   rubricScore: number
 ): MasteryRecord {
-  return recordMasteryUpdate(
-    db,
-    {
-      conceptId,
-      score: nextScore,
-      confidence: confidenceForScore(rubricScore),
-      lastSeenAt: input.lastSeenAt
-    },
-    { traceRecorder: trace, runId }
-  );
+  return recordPersistentMasteryUpdate(db, {
+    conceptId,
+    score: nextScore,
+    confidence: confidenceForScore(rubricScore),
+    lastSeenAt: input.lastSeenAt,
+    trace,
+    runId
+  });
 }
 
 function createTeachbackResult(

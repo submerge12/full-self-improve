@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { MarkdownVaultAdapter } from "../../../adapters/markdown-vault.js";
+import { createConfiguredSourceAdapters } from "../../../adapters/config.js";
 import { applyMigrations } from "../../../db/migrations.js";
 import {
   handleApiRequest,
@@ -93,7 +93,7 @@ export function createRuntimeApiContext(): RuntimeApiContext {
 
   try {
     (runtimeApiContextTestHooks.applyMigrations ?? applyMigrations)(db);
-    const adapters = (runtimeApiContextTestHooks.createEnvAdapters ?? createEnvAdapters)();
+    const adapters = (runtimeApiContextTestHooks.createEnvAdapters ?? createConfiguredSourceAdapters)();
 
     return {
       context: {
@@ -118,19 +118,6 @@ export const __routeAdapterInternals = {
     runtimeApiContextTestHooks = {};
   }
 };
-
-function createEnvAdapters(): ApiHandlerContext["adapters"] {
-  const rootDir = process.env.KNOWLEDGE_LOOP_VAULT_ROOT;
-  if (rootDir === undefined || rootDir.trim().length === 0) {
-    return undefined;
-  }
-
-  const id = process.env.KNOWLEDGE_LOOP_ADAPTER_ID?.trim() || "markdown-vault";
-
-  return {
-    [id]: new MarkdownVaultAdapter({ id, rootDir })
-  };
-}
 
 function headersToRecord(headers: Headers): ApiRequest["headers"] {
   const record: Record<string, string> = {};

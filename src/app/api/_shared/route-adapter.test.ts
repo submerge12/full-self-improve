@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +26,7 @@ import { GET as wikiPagesGet, runtime as wikiPagesRuntime } from "../wiki/pages/
 describe("Next app route adapter", () => {
   const originalEnv = { ...process.env };
   const tempFiles: string[] = [];
+  const tempDirs: string[] = [];
 
   afterEach(() => {
     process.env = { ...originalEnv };
@@ -34,6 +35,12 @@ describe("Next app route adapter", () => {
     for (const file of tempFiles.splice(0)) {
       if (existsSync(file)) {
         unlinkSync(file);
+      }
+    }
+
+    for (const dir of tempDirs.splice(0).reverse()) {
+      if (existsSync(dir)) {
+        rmdirSync(dir);
       }
     }
   });
@@ -211,30 +218,70 @@ describe("Next app route adapter", () => {
     expect(__routeAdapterInternals.resolveRuntimeDbPath()).toBe(dbPath);
   });
 
-  test("runtime context factory registers a markdown vault adapter from env", async () => {
+  test("runtime context factory registers the default Holly vault adapter from env", async () => {
     const vaultRoot = path.join(os.tmpdir(), `knowledge-loop-vault-${Date.now()}`);
     const vaultFile = path.join(vaultRoot, "concept.md");
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-vault-${Date.now()}.db`);
     tempFiles.push(vaultFile, dbPath);
+    tempDirs.push(vaultRoot);
     mkdirSync(vaultRoot);
     writeFileSync(vaultFile, "---\ntitle: Env Concept\n---\n# Env Concept\n", "utf8");
     process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
     process.env.KNOWLEDGE_LOOP_VAULT_ROOT = vaultRoot;
-    process.env.KNOWLEDGE_LOOP_ADAPTER_ID = "env-vault";
 
     const runtime = createRuntimeApiContext();
-    const adapter = runtime.context.adapters?.["env-vault"];
-
-    expect(adapter?.id).toBe("env-vault");
-    expect(adapter?.kind).toBe("markdown-vault");
     const docs = [];
-    if (adapter !== undefined) {
-      for await (const doc of adapter.listDocuments()) {
-        docs.push(doc);
+    try {
+      const adapter = runtime.context.adapters?.["holly-vault"];
+
+      expect(adapter?.id).toBe("holly-vault");
+      expect(adapter?.kind).toBe("markdown-vault");
+      if (adapter !== undefined) {
+        for await (const doc of adapter.listDocuments()) {
+          docs.push(doc);
+        }
       }
+    } finally {
+      runtime.close();
     }
-    expect(docs).toEqual([expect.objectContaining({ adapterId: "env-vault", title: "Env Concept" })]);
-    runtime.close();
+    expect(docs).toEqual([expect.objectContaining({ adapterId: "holly-vault", title: "Env Concept" })]);
+  });
+
+  test("runtime context factory applies vault include and exclude env filters", async () => {
+    const vaultRoot = path.join(os.tmpdir(), `knowledge-loop-vault-filtered-${Date.now()}`);
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-filtered-${Date.now()}.db`);
+    const publicDir = path.join(vaultRoot, "notes");
+    const excludedDir = path.join(vaultRoot, "90_待确认");
+    tempDirs.push(vaultRoot, publicDir, excludedDir);
+    mkdirSync(vaultRoot);
+    mkdirSync(publicDir);
+    mkdirSync(excludedDir);
+    const keptFile = path.join(publicDir, "kept.md");
+    const draftFile = path.join(publicDir, "draft-ignore.md");
+    const excludedFile = path.join(excludedDir, "hidden.md");
+    tempFiles.push(keptFile, draftFile, excludedFile, dbPath);
+    writeFileSync(keptFile, "---\ntitle: Kept\n---\n# Kept\n", "utf8");
+    writeFileSync(draftFile, "---\ntitle: Draft\n---\n# Draft\n", "utf8");
+    writeFileSync(excludedFile, "---\ntitle: Hidden\n---\n# Hidden\n", "utf8");
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_VAULT_ROOT = vaultRoot;
+    process.env.KNOWLEDGE_LOOP_VAULT_INCLUDE = " notes/**, 90_待确认/** ";
+    process.env.KNOWLEDGE_LOOP_VAULT_EXCLUDE = " **/draft-*, 90_待确认/** ";
+
+    const runtime = createRuntimeApiContext();
+    const docs = [];
+    try {
+      const adapter = runtime.context.adapters?.["holly-vault"];
+      if (adapter !== undefined) {
+        for await (const doc of adapter.listDocuments()) {
+          docs.push(doc);
+        }
+      }
+    } finally {
+      runtime.close();
+    }
+
+    expect(docs.map((doc) => doc.path)).toEqual(["notes/kept.md"]);
   });
 });
 

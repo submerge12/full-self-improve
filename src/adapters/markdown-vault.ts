@@ -206,6 +206,10 @@ function matchesGlob(relativePath: string, pattern: string): boolean {
     return relativePath.endsWith(".md");
   }
 
+  if (pattern.startsWith("**/") && pattern.endsWith("/**")) {
+    return matchesDescendantSegment(relativePath, pattern.slice(3, -3));
+  }
+
   if (pattern.endsWith("/**")) {
     return relativePath.startsWith(pattern.slice(0, -2));
   }
@@ -215,15 +219,24 @@ function matchesGlob(relativePath: string, pattern: string): boolean {
   }
 
   if (pattern.includes("*")) {
-    return new RegExp(`^${escapeRegex(pattern).replaceAll("\\*", "[^/]*")}$`).test(relativePath);
+    return new RegExp(`^${globPatternToRegexSource(pattern)}$`).test(relativePath);
   }
 
   return relativePath === pattern;
 }
 
-function matchesSegmentPattern(relativePath: string, segmentPattern: string): boolean {
-  const expression = new RegExp(`(^|/)${escapeRegex(segmentPattern).replaceAll("\\*", "[^/]*")}`);
+function matchesDescendantSegment(relativePath: string, segmentPattern: string): boolean {
+  const expression = new RegExp(`(^|/)${globPatternToRegexSource(segmentPattern)}/`);
   return expression.test(relativePath);
+}
+
+function matchesSegmentPattern(relativePath: string, segmentPattern: string): boolean {
+  const expression = new RegExp(`(^|/)${globPatternToRegexSource(segmentPattern)}($|/)`);
+  return expression.test(relativePath);
+}
+
+function globPatternToRegexSource(value: string): string {
+  return [...value].map((character) => (character === "*" ? "[^/]*" : escapeRegex(character))).join("");
 }
 
 function escapeRegex(value: string): string {

@@ -258,6 +258,50 @@ describe("persistent daily planner", () => {
     expect(countStudyPlans()).toBe(1);
   });
 
+  test("force regenerates an existing plan and resets status to planned", () => {
+    const alpha = createConcept(db, { slug: "alpha", name: "Alpha", status: "generated" });
+    createConcept(db, { slug: "beta", name: "Beta", status: "generated" });
+    createPersistentDailyPlan(db, { date: "2026-06-22", masteryThreshold: 0.8 });
+    db.prepare(
+      `UPDATE study_plans
+       SET status = 'active', rationale = 'Manually accepted plan'
+       WHERE date = ?`
+    ).run("2026-06-22");
+    recordMasteryUpdate(db, {
+      conceptId: alpha.id,
+      score: 0.95,
+      confidence: 0.9,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-22T12:00:00.000Z"
+    });
+    const trace = createTraceRecorder({ now: () => new Date("2026-06-22T13:00:00.000Z") });
+
+    const regenerated = createPersistentDailyPlan(db, {
+      date: "2026-06-22",
+      masteryThreshold: 0.8,
+      runId: "trace-regenerate",
+      trace,
+      force: true
+    });
+
+    expect(regenerated.status).toBe("planned");
+    expect(regenerated.rationale).not.toBe("Manually accepted plan");
+    expect(learnSlugs(regenerated)).toEqual(["beta"]);
+    expect(countStudyPlans()).toBe(1);
+    expect(readStoredPlanQueue("2026-06-22")).toEqual(regenerated.queue);
+    expect(trace.getEvents({ runId: "trace-regenerate", stage: "plan" })).toMatchObject([
+      {
+        stage: "plan",
+        level: "info",
+        data: {
+          date: "2026-06-22",
+          outcome: "regenerated",
+          status: "planned"
+        }
+      }
+    ]);
+  });
+
   test("rejects malformed stored plan activities", () => {
     db.prepare(
       `INSERT INTO study_plans (date, queue, rationale, status)

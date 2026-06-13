@@ -117,12 +117,7 @@ export async function handleApiRequest(
       case "plan.today":
         return handlePlanToday(context);
       case "plan.generate":
-        return errorResponse(
-          501,
-          "not_implemented",
-          "Forced study plan regeneration is not implemented yet.",
-          "plan.generate"
-        );
+        return handlePlanGenerate(context);
       case "mastery.summary":
         return handleMasterySummary(context);
       case "quiz.grade":
@@ -161,6 +156,14 @@ function handlePlanToday(context: ApiHandlerContext): ApiResponse<ApiHandlerResp
   const plan = runMutationWithTrace(context.db, () => createPersistentDailyPlan(context.db, { date: currentDate(context) }));
 
   return successResponse("plan.today", { plan });
+}
+
+function handlePlanGenerate(context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const plan = runMutationWithTrace(context.db, () =>
+    createPersistentDailyPlan(context.db, { date: currentDate(context), force: true })
+  );
+
+  return successResponse("plan.generate", { plan });
 }
 
 function handleMasterySummary(context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {

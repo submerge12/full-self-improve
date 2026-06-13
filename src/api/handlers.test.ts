@@ -364,21 +364,76 @@ describe("pure API request handlers", () => {
     expect(listTraceEvents(db, { runId: data.diagnosis.runId })).toHaveLength(1);
   });
 
-  test("POST /api/plan/generate returns 501 after auth and does not create a study plan", async () => {
+  test("POST /api/plan/generate creates today's plan and persists created trace events", async () => {
     createConcept(db, { slug: "algebra", name: "Algebra", status: "generated" });
 
-    const response = await handleApiRequest(authRequest("POST", "/api/plan/generate"), context());
+    const response = await handleApiRequest(authRequest("POST", "/api/plan/generate"), context({ now: fixedNow }));
 
-    expect(response.status).toBe(501);
-    expect(response.body).toEqual({
-      ok: false,
-      error: {
-        code: "not_implemented",
-        message: "Forced study plan regeneration is not implemented yet.",
-        routeId: "plan.generate"
-      }
+    expect(response.status).toBe(200);
+    const data = responseData<PlanTodayData>(response);
+    expect(response.body).toMatchObject({ ok: true, routeId: "plan.generate" });
+    expect(data.plan).toMatchObject({
+      date: "2026-06-13",
+      status: "planned"
     });
-    expect(countRows("study_plans")).toBe(0);
+    expect(data.plan.queue).toHaveLength(3);
+    expect(countRows("study_plans")).toBe(1);
+    expect(listTraceEvents(db, { runId: data.plan.runId })).toMatchObject([
+      {
+        stage: "plan",
+        level: "info",
+        data: {
+          outcome: "created",
+          date: "2026-06-13",
+          status: "planned"
+        }
+      }
+    ]);
+  });
+
+  test("POST /api/plan/generate force regenerates today's existing plan and resets status", async () => {
+    const alpha = createConcept(db, { slug: "alpha", name: "Alpha", status: "generated" });
+    createConcept(db, { slug: "beta", name: "Beta", status: "generated" });
+    await handleApiRequest(authRequest("GET", "/api/plan/today"), context({ now: fixedNow }));
+    db.prepare(
+      `UPDATE study_plans
+       SET status = 'completed', rationale = 'Finished old plan'
+       WHERE date = ?`
+    ).run("2026-06-13");
+    recordMasteryUpdate(db, {
+      conceptId: alpha.id,
+      score: 0.95,
+      confidence: 0.9,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-13T10:00:00.000Z"
+    });
+
+    const response = await handleApiRequest(authRequest("POST", "/api/plan/generate"), context({ now: fixedNow }));
+
+    expect(response.status).toBe(200);
+    const data = responseData<PlanTodayData>(response);
+    expect(data.plan).toMatchObject({
+      date: "2026-06-13",
+      status: "planned"
+    });
+    expect(data.plan.rationale).not.toBe("Finished old plan");
+    expect(data.plan.queue.map((activity) => (activity as { conceptSlug: string }).conceptSlug)).toEqual([
+      "beta",
+      "beta",
+      "beta"
+    ]);
+    expect(countRows("study_plans")).toBe(1);
+    expect(listTraceEvents(db, { runId: data.plan.runId }).at(-1)).toMatchObject(
+      {
+        stage: "plan",
+        level: "info",
+        data: {
+          outcome: "regenerated",
+          date: "2026-06-13",
+          status: "planned"
+        }
+      }
+    );
   });
 
   function seedTeachbackConcept(slug: string, name: string, markdown: string): void {

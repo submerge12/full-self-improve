@@ -13,6 +13,7 @@ export type StudyPlanStatus = "planned" | "active" | "completed" | "skipped";
 
 export interface PersistentDailyPlanOptions {
   date: string | Date;
+  force?: boolean;
   masteryThreshold?: number;
   runId?: string;
   trace?: TraceRecorder;
@@ -66,7 +67,7 @@ export function createPersistentDailyPlan(
 
   const plan = db.transaction((): PersistentDailyPlan => {
     const existing = getStudyPlanByDate(db, date);
-    if (existing !== undefined) {
+    if (existing !== undefined && options.force !== true) {
       return toPersistentPlan(existing, trace, "reused");
     }
 
@@ -76,13 +77,14 @@ export function createPersistentDailyPlan(
       edges: selectEligiblePrerequisiteEdges(db, threshold)
     });
 
-    insertStudyPlan(db, date, draft.queue, draft.rationale);
+    const outcome = existing === undefined ? "created" : "regenerated";
+    upsertStudyPlan(db, date, draft.queue, draft.rationale);
     const created = getStudyPlanByDate(db, date);
     if (created === undefined) {
-      throw new Error(`Study plan ${date} was not found after insert`);
+      throw new Error(`Study plan ${date} was not found after upsert`);
     }
 
-    return toPersistentPlan(created, trace, "created");
+    return toPersistentPlan(created, trace, outcome);
   })();
 
   return plan;
@@ -171,10 +173,14 @@ function masteryScore(concept: ConceptPlanningRow): number {
   return concept.masteryScore ?? 0;
 }
 
-function insertStudyPlan(db: Database.Database, date: string, queue: DailyPlanActivity[], rationale: string): void {
+function upsertStudyPlan(db: Database.Database, date: string, queue: DailyPlanActivity[], rationale: string): void {
   db.prepare(
-    `INSERT OR IGNORE INTO study_plans (date, queue, rationale, status)
-     VALUES (?, ?, ?, 'planned')`
+    `INSERT INTO study_plans (date, queue, rationale, status)
+     VALUES (?, ?, ?, 'planned')
+     ON CONFLICT(date) DO UPDATE SET
+       queue = excluded.queue,
+       rationale = excluded.rationale,
+       status = 'planned'`
   ).run(date, JSON.stringify(queue), rationale);
 }
 
@@ -188,7 +194,9 @@ function getStudyPlanByDate(db: Database.Database, date: string): StudyPlanRow |
     .get(date) as StudyPlanRow | undefined;
 }
 
-function toPersistentPlan(row: StudyPlanRow, trace: TraceContext, outcome: "created" | "reused"): PersistentDailyPlan {
+type PlanTraceOutcome = "created" | "reused" | "regenerated";
+
+function toPersistentPlan(row: StudyPlanRow, trace: TraceContext, outcome: PlanTraceOutcome): PersistentDailyPlan {
   const queue = parseQueue(row);
   recordPlanTrace(trace, outcome, row.date, queue.length, row.status);
 
@@ -260,16 +268,22 @@ function createTraceContext(runId: string, recorder: TraceRecorder | undefined, 
 
 function recordPlanTrace(
   trace: TraceContext,
-  outcome: "created" | "reused",
+  outcome: PlanTraceOutcome,
   date: string,
   activityCount: number,
   status: StudyPlanStatus
 ): void {
+  const messages: Record<PlanTraceOutcome, string> = {
+    created: "Persistent daily plan created",
+    reused: "Persistent daily plan reused",
+    regenerated: "Persistent daily plan regenerated"
+  };
+
   trace.recorder.record({
     runId: trace.runId,
     stage: "plan",
     level: "info",
-    message: outcome === "created" ? "Persistent daily plan created" : "Persistent daily plan reused",
+    message: messages[outcome],
     data: {
       outcome,
       date,

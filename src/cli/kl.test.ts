@@ -12,6 +12,7 @@ import { persistTraceEvent } from "../db/trace-store.js";
 import type { TraceEvent } from "../engine/trace.js";
 import {
   handleKlCommand,
+  type KlAgentDryRunCommandResult,
   type KlCommandResult,
   type KlPersistentQuizCommandResult,
   type KlPersistentTeachbackCommandResult
@@ -391,10 +392,105 @@ function listTableNames(dbPath: string): string[] {
 }
 
 describe("kl CLI handler", () => {
-  test("unknown command lists diagnose as an expected command", async () => {
+  test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent/
     );
+  });
+
+  test("agent dry-run prints planned Multica actions without requiring API keys", async () => {
+    const envNames = ["DEEPSEEK_API_KEY", "QWEN_API_KEY", "OPENAI_API_KEY", "LLM_PROVIDER"] as const;
+    const savedEnv = new Map<(typeof envNames)[number], string | undefined>(
+      envNames.map((name) => [name, process.env[name]])
+    );
+    const stdout = createCapture();
+
+    try {
+      for (const name of envNames) {
+        delete process.env[name];
+      }
+
+      const result = (await handleKlCommand(
+        [
+          "agent",
+          "--dry-run",
+          "--role",
+          "scholar",
+          "--phase",
+          "morning-plan",
+          "--date",
+          "2026-06-13",
+          "--knowledge-loop-url",
+          "http://127.0.0.1:3124/",
+          "--board",
+          "Holly Daily"
+        ],
+        { stdout: stdout.sink }
+      )) as KlAgentDryRunCommandResult;
+
+      expect(parseCapturedJson(stdout)).toEqual(result);
+      expect(result).toMatchObject({
+        command: "agent",
+        mode: "dry-run",
+        result: {
+          mode: "dry-run",
+          role: "scholar",
+          phase: "morning-plan",
+          date: "2026-06-13",
+          multicaBoard: "Holly Daily",
+          externalWrites: [],
+          llmCost: { estimatedUsd: 0, source: "dry-run-no-llm" }
+        }
+      });
+      expect(result.result.externalReads).toEqual([
+        expect.objectContaining({
+          method: "GET",
+          url: "http://127.0.0.1:3124/api/plan/today"
+        })
+      ]);
+      expect(result.result.intendedActions).toEqual([
+        expect.objectContaining({
+          target: "multica",
+          type: "create_task",
+          title: "Scholar study plan for 2026-06-13"
+        })
+      ]);
+    } finally {
+      for (const [name, value] of savedEnv) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+    }
+  });
+
+  test("agent command requires dry-run mode and validates role phase combinations", async () => {
+    await expect(handleKlCommand(["agent", "--role", "librarian", "--date", "2026-06-13"])).rejects.toThrow(
+      /supports only --dry-run/
+    );
+    await expect(handleKlCommand(["agent", "--dry-run", "--role", "coach", "--date", "2026-06-13"])).rejects.toThrow(
+      /Invalid agent role/
+    );
+    await expect(
+      handleKlCommand(["agent", "--dry-run", "--role", "librarian", "--phase", "morning-plan", "--date", "2026-06-13"])
+    ).rejects.toThrow(/cannot run phase/);
+  });
+
+  test("agent command rejects duplicate options, missing values, and invalid dates", async () => {
+    await expect(
+      handleKlCommand(["agent", "--dry-run", "--role", "librarian", "--role", "scholar", "--date", "2026-06-13"])
+    ).rejects.toThrow(/requires exactly one --role/);
+    await expect(handleKlCommand(["agent", "--dry-run", "--role", "librarian", "--date"])).rejects.toThrow(
+      /Option --date for agent requires a value/
+    );
+    await expect(handleKlCommand(["agent", "--dry-run", "--role", "librarian", "--date", "2026-02-31"])).rejects.toThrow(
+      /Invalid agent date/
+    );
+    await expect(
+      handleKlCommand(["agent", "--dry-run", "--role", "nutritionist", "--date", "2026-06-13", "--bogus", "1"])
+    ).rejects.toThrow(/Unknown option for agent: --bogus/);
   });
 
   test("with API key env vars deleted, CLI mock persistent flow runs ingest, plan, quiz, teachback, diagnose, and trace against one DB", async () => {

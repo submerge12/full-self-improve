@@ -4,6 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import Database from "better-sqlite3";
 
+import {
+  createAgentDryRunPlan,
+  parseAgentPhase,
+  parseAgentRole,
+  type AgentDryRunPlan
+} from "../agents/dry-run.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -117,13 +123,22 @@ export interface KlPersistentTraceCommandResult {
 
 export type KlTraceCommandResult = KlPersistentTraceCommandResult;
 
+export interface KlAgentDryRunCommandResult {
+  command: "agent";
+  mode: "dry-run";
+  result: AgentDryRunPlan;
+}
+
+export type KlAgentCommandResult = KlAgentDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
   | KlQuizCommandResult
   | KlTeachbackCommandResult
   | KlDiagnoseCommandResult
-  | KlTraceCommandResult;
+  | KlTraceCommandResult
+  | KlAgentCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -156,7 +171,13 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
     return runTraceCommand(args);
   }
 
-  throw new UsageError(`Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace.`);
+  if (command === "agent") {
+    return runAgentCommand(args);
+  }
+
+  throw new UsageError(
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent.`
+  );
 }
 
 export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO = {}): Promise<KlCommandResult> {
@@ -359,6 +380,36 @@ function runTraceCommand(args: readonly string[]): KlTraceCommandResult {
   }
 }
 
+function runAgentCommand(args: readonly string[]): KlAgentCommandResult {
+  const { dryRun, options } = parseAgentOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent currently supports only --dry-run.");
+  }
+
+  const role = parseAgentRole(requireOne(options, "--role", "agent"));
+  const phaseValue = optionalOne(options, "--phase", "agent");
+  const date = requireOne(options, "--date", "agent");
+  const knowledgeLoopBaseUrl = optionalOne(options, "--knowledge-loop-url", "agent");
+  const compassHealthBaseUrl = optionalOne(options, "--compass-health-url", "agent");
+  const adapterId = optionalOne(options, "--adapter", "agent");
+  const multicaBoard = optionalOne(options, "--board", "agent");
+  const result = createAgentDryRunPlan({
+    role,
+    ...(phaseValue === undefined ? {} : { phase: parseAgentPhase(phaseValue) }),
+    date,
+    ...(knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl }),
+    ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
+    ...(adapterId === undefined ? {} : { adapterId }),
+    ...(multicaBoard === undefined ? {} : { multicaBoard })
+  });
+
+  return {
+    command: "agent",
+    mode: "dry-run",
+    result
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -385,6 +436,49 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
   }
 
   return options;
+}
+
+function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  const allowed = new Set([
+    "--role",
+    "--phase",
+    "--date",
+    "--knowledge-loop-url",
+    "--compass-health-url",
+    "--adapter",
+    "--board"
+  ]);
+  const options = new Map<string, string[]>();
+  let dryRun = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index];
+    const value = args[index + 1];
+
+    if (name === "--dry-run") {
+      dryRun = true;
+      continue;
+    }
+
+    if (name === undefined || !name.startsWith("--")) {
+      throw new UsageError(`Unexpected positional argument for agent: ${name ?? ""}`);
+    }
+
+    if (!allowed.has(name)) {
+      throw new UsageError(`Unknown option for agent: ${name}`);
+    }
+
+    if (value === undefined || value.startsWith("--")) {
+      throw new UsageError(`Option ${name} for agent requires a value.`);
+    }
+
+    const values = options.get(name) ?? [];
+    values.push(value);
+    options.set(name, values);
+    index += 1;
+  }
+
+  return { dryRun, options };
 }
 
 function persistCommandTraceEvents(db: Database.Database, result: { traceEvents: readonly TraceEvent[] }): void {

@@ -159,6 +159,16 @@ The day runner report always includes an `llmCost` summary with per-agent entrie
 
 When a future pi-harness cost snapshot client is injected, each agent entry can surface the external `pi-harness-live` cost, currency, and detail, and the day report totals those entries. This wiring makes cost visible in the agent-day report, but it does not prove the pi-harness dependency is installed, does not read the pi-harness checkout, and does not close the M2 live cost proof until a real run captures non-placeholder cost data.
 
+## pi-harness Dependency Preflight
+
+Before claiming the pi-harness dependency is ready for the live gate, run the read-only dependency preflight:
+
+```powershell
+npm run kl -- agent-harness-dependency --dry-run --harness-path G:\pi-harness
+```
+
+This checks the external package metadata, required `dist` entry files, CLI bin target, scaffolding script presence, and `git --no-optional-locks -C <path> status --short` for the pi-harness checkout. Required paths must be files, not directories. It does not install, link, import, run scaffolding, or modify `G:\pi-harness`. A blocked result means the dependency proof is not ready; the default report redacts the external path and reports only the dirty entry count rather than raw filenames, and read/git inspection failures use sanitized errors.
+
 ## Offline Board-Day Evidence Validation
 
 After real board observations are captured, validate the evidence file against the live-smoke manifest:

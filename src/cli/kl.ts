@@ -1,5 +1,6 @@
 #!/usr/bin/env -S tsx
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,6 +47,7 @@ import {
   type AgentFailureSmokeEndpointSelector,
   type AgentFailureSmokeReport
 } from "../agents/failure-smoke.js";
+import { validatePiHarnessDependency, type PiHarnessDependencyReport } from "../agents/pi-harness-dependency.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -86,6 +88,11 @@ export interface KlHandlerIO {
   stderr?: WritableSink;
   fetch?: AgentFetch;
   env?: Readonly<Record<string, string | undefined>>;
+  execFile?: (file: string, args: readonly string[]) => string;
+  fileSystem?: {
+    readJson(filePath: string): unknown;
+    isFile(filePath: string): boolean;
+  };
 }
 
 export interface KlMockIngestCommandResult {
@@ -295,6 +302,18 @@ export interface KlAgentFailureSmokeDryRunCommandResult {
 
 export type KlAgentFailureSmokeCommandResult = KlAgentFailureSmokeDryRunCommandResult;
 
+export interface KlAgentHarnessDependencyDryRunResult extends PiHarnessDependencyReport {
+  readonly harnessPath: string;
+}
+
+export interface KlAgentHarnessDependencyDryRunCommandResult {
+  command: "agent-harness-dependency";
+  mode: "dry-run";
+  result: KlAgentHarnessDependencyDryRunResult;
+}
+
+export type KlAgentHarnessDependencyCommandResult = KlAgentHarnessDependencyDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -309,7 +328,8 @@ export type KlCommandResult =
   | KlAgentPreflightCommandResult
   | KlAgentBoardConfigCommandResult
   | KlAgentBoardEvidenceCommandResult
-  | KlAgentFailureSmokeCommandResult;
+  | KlAgentFailureSmokeCommandResult
+  | KlAgentHarnessDependencyCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -374,8 +394,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentFailureSmokeCommand(args);
   }
 
+  if (command === "agent-harness-dependency") {
+    return runAgentHarnessDependencyCommand(args, io);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -916,6 +940,74 @@ async function runAgentFailureSmokeCommand(args: readonly string[]): Promise<KlA
   };
 }
 
+function runAgentHarnessDependencyCommand(
+  args: readonly string[],
+  io: KlHandlerIO
+): KlAgentHarnessDependencyCommandResult {
+  const { dryRun, options } = parseAgentHarnessDependencyOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-harness-dependency supports only --dry-run.");
+  }
+
+  const harnessPath = path.resolve(requireOne(options, "--harness-path", "agent-harness-dependency"));
+  const fileSystem = io.fileSystem ?? defaultFileSystem;
+  const execFile = io.execFile ?? defaultExecFile;
+  const packageJson = readHarnessPackageJson(fileSystem, harnessPath);
+  const result = validatePiHarnessDependency({
+    packageJson,
+    distFiles: {
+      main: fileSystem.isFile(path.join(harnessPath, "dist", "index.js")),
+      types: fileSystem.isFile(path.join(harnessPath, "dist", "index.d.ts")),
+      cli: fileSystem.isFile(path.join(harnessPath, "dist", "cli", "index.js")),
+      cliTypes: fileSystem.isFile(path.join(harnessPath, "dist", "cli", "index.d.ts")),
+      newAgentScript: fileSystem.isFile(path.join(harnessPath, "scripts", "new-agent.mjs"))
+    },
+    gitStatusShort: readHarnessGitStatus(execFile, harnessPath)
+  });
+
+  return {
+    command: "agent-harness-dependency",
+    mode: "dry-run",
+    result: {
+      harnessPath: "EXTERNAL_PATH_REDACTED",
+      ...result
+    }
+  };
+}
+
+const defaultFileSystem: NonNullable<KlHandlerIO["fileSystem"]> = {
+  readJson(filePath) {
+    return JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+  },
+  isFile(filePath) {
+    try {
+      return statSync(filePath).isFile();
+    } catch {
+      return false;
+    }
+  }
+};
+
+function defaultExecFile(file: string, args: readonly string[]): string {
+  return execFileSync(file, [...args], { encoding: "utf8" });
+}
+
+function readHarnessPackageJson(fileSystem: NonNullable<KlHandlerIO["fileSystem"]>, harnessPath: string): unknown {
+  try {
+    return fileSystem.readJson(path.join(harnessPath, "package.json"));
+  } catch {
+    throw new UsageError("Pi-harness dependency preflight could not read package.json from the provided harness path.");
+  }
+}
+
+function readHarnessGitStatus(execFile: NonNullable<KlHandlerIO["execFile"]>, harnessPath: string): string {
+  try {
+    return execFile("git", ["--no-optional-locks", "-C", harnessPath, "status", "--short"]);
+  } catch {
+    throw new UsageError("Pi-harness dependency preflight could not inspect git status for the provided harness path.");
+  }
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -1058,6 +1150,14 @@ function parseAgentFailureSmokeOptions(args: readonly string[]): { dryRun: boole
       "--config"
     ]),
     "agent-failure-smoke"
+  );
+}
+
+function parseAgentHarnessDependencyOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(
+    args,
+    new Set(["--harness-path"]),
+    "agent-harness-dependency"
   );
 }
 

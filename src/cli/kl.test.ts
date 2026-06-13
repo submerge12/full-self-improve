@@ -18,6 +18,7 @@ import {
   type KlAgentBoardConfigDryRunCommandResult,
   type KlAgentDryRunCommandResult,
   type KlAgentFailureSmokeDryRunCommandResult,
+  type KlAgentHarnessDependencyDryRunCommandResult,
   type KlAgentLiveSmokeDryRunCommandResult,
   type KlAgentPreflightDryRunCommandResult,
   type KlAgentScheduleDryRunCommandResult,
@@ -88,6 +89,34 @@ function successfulApiBodyForUrl(url: string): Record<string, unknown> {
   }
 
   return { ok: true, url };
+}
+
+function piHarnessPackageJson(): Record<string, unknown> {
+  return {
+    name: "pi-harness",
+    version: "0.1.0",
+    main: "./dist/index.js",
+    types: "./dist/index.d.ts",
+    bin: {
+      "pi-harness": "./dist/cli/index.js"
+    },
+    exports: {
+      ".": {
+        types: "./dist/index.d.ts",
+        import: "./dist/index.js",
+        default: "./dist/index.js"
+      },
+      "./cli": {
+        types: "./dist/cli/index.d.ts",
+        import: "./dist/cli/index.js",
+        default: "./dist/cli/index.js"
+      }
+    },
+    scripts: {
+      build: "tsc -p tsconfig.build.json",
+      "new-agent": "node scripts/new-agent.mjs"
+    }
+  };
 }
 
 type CountableTable =
@@ -967,6 +996,136 @@ describe("kl CLI handler", () => {
         "real-secret"
       ])
     ).rejects.toThrow("No endpoint matched failure smoke selector.");
+  });
+
+  test("agent-harness-dependency dry-run reports pi-harness package and dirty checkout status", async () => {
+    const stdout = createCapture();
+    const harnessRoot = path.join(tmpdir(), "pi-harness-fixture");
+    const result = (await handleKlCommand(
+      ["agent-harness-dependency", "--dry-run", "--harness-path", harnessRoot],
+      {
+        stdout: stdout.sink,
+        execFile(file, args) {
+          expect(file).toBe("git");
+          expect(args).toEqual(["--no-optional-locks", "-C", harnessRoot, "status", "--short"]);
+          return "?? .env.local\n?? secrets/private-key.pem\n";
+        },
+        fileSystem: {
+          readJson(filePath) {
+            expect(filePath).toBe(path.join(harnessRoot, "package.json"));
+            return piHarnessPackageJson();
+          },
+          isFile(filePath) {
+            return [
+              path.join(harnessRoot, "dist", "index.js"),
+              path.join(harnessRoot, "dist", "index.d.ts"),
+              path.join(harnessRoot, "dist", "cli", "index.js"),
+              path.join(harnessRoot, "dist", "cli", "index.d.ts"),
+              path.join(harnessRoot, "scripts", "new-agent.mjs")
+            ].includes(filePath);
+          }
+        }
+      }
+    )) as KlAgentHarnessDependencyDryRunCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-harness-dependency",
+      mode: "dry-run",
+      result: {
+        harnessPath: "EXTERNAL_PATH_REDACTED",
+        status: "blocked",
+        package: {
+          name: "pi-harness",
+          version: "0.1.0"
+        },
+        gitStatusEntryCount: 2
+      }
+    });
+    expect(JSON.stringify(result)).not.toContain(harnessRoot);
+    expect(JSON.stringify(result)).not.toContain(".env.local");
+    expect(JSON.stringify(result)).not.toContain("private-key.pem");
+  });
+
+  test("agent-harness-dependency blocks when an expected dist path is not a file", async () => {
+    const harnessRoot = path.join(tmpdir(), "pi-harness-fixture");
+    const result = (await handleKlCommand(
+      ["agent-harness-dependency", "--dry-run", "--harness-path", harnessRoot],
+      {
+        execFile() {
+          return "";
+        },
+        fileSystem: {
+          readJson() {
+            return piHarnessPackageJson();
+          },
+          isFile(filePath) {
+            return filePath !== path.join(harnessRoot, "dist", "index.js");
+          }
+        }
+      }
+    )) as KlAgentHarnessDependencyDryRunCommandResult;
+
+    expect(result.result.status).toBe("blocked");
+    expect(result.result.checks).toContainEqual(
+      expect.objectContaining({
+        id: "dist_main_exists",
+        status: "blocked"
+      })
+    );
+  });
+
+  test("agent-harness-dependency redacts harness path from package and git failures", async () => {
+    const harnessRoot = path.join(tmpdir(), "secret-harness-root");
+
+    await expect(
+      handleKlCommand(["agent-harness-dependency", "--dry-run", "--harness-path", harnessRoot], {
+        fileSystem: {
+          readJson() {
+            throw new Error(`ENOENT: no such file, open '${path.join(harnessRoot, "package.json")}'`);
+          },
+          isFile() {
+            return false;
+          }
+        }
+      })
+    ).rejects.toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining(harnessRoot)
+      })
+    );
+
+    await expect(
+      handleKlCommand(["agent-harness-dependency", "--dry-run", "--harness-path", harnessRoot], {
+        execFile() {
+          throw new Error(`git --no-optional-locks -C ${harnessRoot} status --short failed`);
+        },
+        fileSystem: {
+          readJson() {
+            return piHarnessPackageJson();
+          },
+          isFile() {
+            return true;
+          }
+        }
+      })
+    ).rejects.toThrow(
+      expect.objectContaining({
+        message: expect.not.stringContaining(harnessRoot)
+      })
+    );
+  });
+
+  test("agent-harness-dependency command validates dry-run mode and harness path", async () => {
+    await expect(handleKlCommand(["agent-harness-dependency", "--harness-path", "G:\\pi-harness"])).rejects.toThrow(
+      /supports only --dry-run/
+    );
+    await expect(handleKlCommand(["agent-harness-dependency", "--dry-run"])).rejects.toThrow(
+      /requires exactly one --harness-path/
+    );
+    await expect(
+      handleKlCommand(["agent-harness-dependency", "--dry-run", "--harness-path", "G:\\pi-harness", "--live", "1"])
+    ).rejects.toThrow(/Unknown option for agent-harness-dependency: --live/);
   });
 
   test("agent-live-smoke dry-run validates the checked-in manifest without fetching", async () => {

@@ -1,4 +1,5 @@
 #!/usr/bin/env -S tsx
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -27,6 +28,7 @@ import {
   type AgentScheduleDryRunReport,
   type AgentScheduleArgvOptions
 } from "../agents/schedule.js";
+import { validateLiveSmokeManifest, type LiveSmokeManifestValidationResult } from "../agents/live-smoke-manifest.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -172,6 +174,23 @@ export interface KlAgentScheduleDryRunCommandResult {
 
 export type KlAgentScheduleCommandResult = KlAgentScheduleDryRunCommandResult;
 
+export interface KlAgentLiveSmokeDryRunResult {
+  readonly manifestPath: string;
+  readonly date: string;
+  readonly valid: boolean;
+  readonly validation: LiveSmokeManifestValidationResult;
+  readonly nonCompletionNotice: string;
+  readonly plan: AgentDayDryRunPlan;
+}
+
+export interface KlAgentLiveSmokeDryRunCommandResult {
+  command: "agent-live-smoke";
+  mode: "dry-run";
+  result: KlAgentLiveSmokeDryRunResult;
+}
+
+export type KlAgentLiveSmokeCommandResult = KlAgentLiveSmokeDryRunCommandResult;
+
 export type KlCommandResult =
   | KlIngestCommandResult
   | KlPlanCommandResult
@@ -181,7 +200,8 @@ export type KlCommandResult =
   | KlTraceCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
-  | KlAgentScheduleCommandResult;
+  | KlAgentScheduleCommandResult
+  | KlAgentLiveSmokeCommandResult;
 
 class UsageError extends Error {
   readonly exitCode = 2;
@@ -226,8 +246,12 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runAgentScheduleCommand(args);
   }
 
+  if (command === "agent-live-smoke") {
+    return runAgentLiveSmokeCommand(args);
+  }
+
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke.`
   );
 }
 
@@ -236,6 +260,9 @@ export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO =
   io.stdout?.write(`${JSON.stringify(result, null, 2)}\n`);
   return result;
 }
+
+const DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE =
+  "This offline validation does not execute Multica, install a scheduler, prove live board posting, or close M2.";
 
 async function runIngestCommand(args: readonly string[]): Promise<KlIngestCommandResult> {
   const options = parseOptions(args, new Set(["--vault", "--db"]), "ingest");
@@ -534,6 +561,40 @@ function runAgentScheduleCommand(args: readonly string[]): KlAgentScheduleComman
   };
 }
 
+function runAgentLiveSmokeCommand(args: readonly string[]): KlAgentLiveSmokeCommandResult {
+  const { dryRun, options } = parseAgentLiveSmokeOptions(args);
+  if (!dryRun) {
+    throw new UsageError("Command agent-live-smoke supports only --dry-run.");
+  }
+
+  const config = loadOptionalAgentConfig(options, "agent-live-smoke");
+  const date = requireOne(options, "--date", "agent-live-smoke");
+  const plan = createAgentDayDryRunPlan(
+    agentDayInputFromConfig({
+      config,
+      overrides: agentDryRunOverrides(options, "agent-live-smoke"),
+      date
+    })
+  );
+  const manifestPath = requireOne(options, "--manifest", "agent-live-smoke");
+  const { manifest, relativePath } = loadLiveSmokeManifest(manifestPath);
+  const validation = validateLiveSmokeManifest(manifest, plan);
+  const valid = validation.errors.length === 0;
+
+  return {
+    command: "agent-live-smoke",
+    mode: "dry-run",
+    result: {
+      manifestPath: relativePath,
+      date,
+      valid,
+      validation,
+      nonCompletionNotice: valid ? readManifestNotice(manifest) : DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE,
+      plan
+    }
+  };
+}
+
 function parseOptions(args: readonly string[], allowed: Set<string>, command: string): Map<string, string[]> {
   const options = new Map<string, string[]>();
 
@@ -618,10 +679,61 @@ function parseAgentScheduleOptions(args: readonly string[]): { dryRun: boolean; 
   );
 }
 
+function parseAgentLiveSmokeOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+  return parseFlaggedOptions(
+    args,
+    new Set([
+      "--manifest",
+      "--date",
+      "--knowledge-loop-url",
+      "--compass-health-url",
+      "--adapter",
+      "--board",
+      "--config"
+    ]),
+    "agent-live-smoke"
+  );
+}
+
 function loadOptionalAgentConfig(options: Map<string, string[]>, command: string): AgentRuntimeConfig | undefined {
   const configPath = optionalOne(options, "--config", command);
 
   return configPath === undefined ? undefined : loadAgentRuntimeConfig(configPath);
+}
+
+function loadLiveSmokeManifest(manifestPath: string): { manifest: unknown; relativePath: string } {
+  const projectRoot = realpathSync(path.resolve(process.cwd()));
+  const resolvedPath = path.resolve(projectRoot, manifestPath);
+  const relative = path.relative(projectRoot, resolvedPath);
+
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("Live smoke manifest path must stay inside the knowledge-loop checkout.");
+  }
+
+  if (!existsSync(resolvedPath)) {
+    throw new Error(`Live smoke manifest path does not exist: ${manifestPath}.`);
+  }
+
+  const realPath = realpathSync(resolvedPath);
+  const realRelative = path.relative(projectRoot, realPath);
+  if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+    throw new Error("Live smoke manifest path must stay inside the knowledge-loop checkout.");
+  }
+
+  const manifest = JSON.parse(readFileSync(realPath, "utf8")) as unknown;
+
+  return {
+    manifest,
+    relativePath: toPosixPath(realRelative)
+  };
+}
+
+function readManifestNotice(value: unknown): string {
+  if (isRecord(value) && typeof value.nonCompletionNotice === "string" && value.nonCompletionNotice.length > 0) {
+    return value.nonCompletionNotice;
+  }
+
+  return DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE;
 }
 
 function agentDryRunOverrides(options: Map<string, string[]>, command: string): AgentDryRunDefaults {
@@ -807,6 +919,14 @@ function parseConcept(value: string): PlanConceptInput {
     slug,
     name
   };
+}
+
+function toPosixPath(value: string): string {
+  return value.split(path.sep).join("/");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isDirectRun(): boolean {

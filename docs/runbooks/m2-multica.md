@@ -89,6 +89,21 @@ Use `config/multica/live-smoke.example.json` as the pre-live board-day contract.
 
 The manifest is offline-only and keeps `contractStatus` at `inferred_live_smoke_pending`. It validates what the future live smoke must prove, but it does not call Multica, install a scheduler, prove live board posting, or close M2.
 
+## Offline Live-Smoke CLI Validation
+
+Before any live publish attempt, validate the manifest through the CLI entry from `G:\knowledge-loop`. The command entry is `kl agent-live-smoke`; from this checkout, run it through the project script:
+
+```powershell
+npm run kl -- agent-live-smoke --dry-run `
+  --manifest config/multica/live-smoke.example.json `
+  --date 2026-06-14 `
+  --board daily-plan
+```
+
+This is a manifest-validation dry run only. It reads the manifest inside this checkout, compares the selected board day with the dry-run agent-day plan, prints validation status plus the dry-run plan, and keeps `externalWrites` empty. It must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not read or write the Multica or pi-harness checkouts, and must not accept `--live`.
+
+A passing result means the checked-in manifest still describes the offline board-day contract for the requested date. It does not execute Multica, install a scheduler, prove live board posting, prove two consecutive hands-free days, or close M2.
+
 ## Live Gate
 
 Before enabling live publish, verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.

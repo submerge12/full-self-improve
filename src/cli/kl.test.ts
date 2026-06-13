@@ -13,6 +13,7 @@ import type { TraceEvent } from "../engine/trace.js";
 import {
   handleKlCommand,
   type KlAgentDayDryRunCommandResult,
+  type KlAgentDayLiveCommandResult,
   type KlAgentDryRunCommandResult,
   type KlCommandResult,
   type KlPersistentQuizCommandResult,
@@ -49,6 +50,21 @@ function rmdirIfEmpty(dirPath: string): void {
 
 function parseCapturedJson(capture: { text(): string }): KlCommandResult {
   return JSON.parse(capture.text()) as KlCommandResult;
+}
+
+interface FetchCall {
+  readonly input: string | URL | Request;
+  readonly init: RequestInit | undefined;
+}
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: {
+      "content-type": "application/json",
+      ...init.headers
+    }
+  });
 }
 
 type CountableTable =
@@ -537,10 +553,107 @@ describe("kl CLI handler", () => {
     ]);
   });
 
-  test("agent-day command validates dry-run and options", async () => {
+  test("agent-day live mode manually runs the day sequence through injected HTTP clients", async () => {
+    const stdout = createCapture();
+    const calls: FetchCall[] = [];
+    const result = (await handleKlCommand(
+      [
+        "agent-day",
+        "--live",
+        "--date",
+        "2026-06-13",
+        "--knowledge-loop-url",
+        "http://knowledge.local",
+        "--compass-health-url",
+        "http://compass.local",
+        "--board",
+        "Holly Daily",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks",
+        "--multica-add-comment-url",
+        "http://multica.local/api/comments"
+      ],
+      {
+        stdout: stdout.sink,
+        env: {
+          KL_AGENT_READ_BEARER_TOKEN: "read-secret",
+          KL_MULTICA_BEARER_TOKEN: "board-secret"
+        },
+        async fetch(input, init) {
+          calls.push({ input, init });
+          const url = String(input);
+          if (url.startsWith("http://multica.local/")) {
+            return jsonResponse({
+              id: `item-${calls.filter((call) => String(call.input).startsWith("http://multica.local/")).length}`,
+              url: `${url}/published`
+            });
+          }
+
+          return jsonResponse({ ok: true, url });
+        }
+      }
+    )) as KlAgentDayLiveCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-day",
+      mode: "live",
+      result: {
+        mode: "live",
+        date: "2026-06-13",
+        multicaBoard: "Holly Daily",
+        status: "completed",
+        totals: {
+          reads: 4,
+          publishedActions: 4,
+          blockers: 0,
+          publishFailures: 0
+        }
+      }
+    });
+    expect(result.result.publishedActions.map((publish) => publish.action.title)).toEqual([
+      "Librarian ingest report for 2026-06-13",
+      "Scholar study plan for 2026-06-13",
+      "Nutrition plan for 2026-06-13",
+      "Scholar mastery report for 2026-06-13"
+    ]);
+    expect(calls.map((call) => String(call.input))).toEqual([
+      "http://knowledge.local/api/ingest/run?adapter=holly-vault",
+      "http://multica.local/api/comments",
+      "http://knowledge.local/api/plan/today",
+      "http://multica.local/api/tasks",
+      "http://compass.local/api/meal-plan/today?date=2026-06-13",
+      "http://multica.local/api/tasks",
+      "http://knowledge.local/api/mastery/summary",
+      "http://multica.local/api/comments"
+    ]);
+    expect(calls[0]?.init?.headers).toMatchObject({ Authorization: "Bearer read-secret" });
+    expect(calls[1]?.init?.headers).toMatchObject({ Authorization: "Bearer board-secret" });
+  });
+
+  test("agent-day live mode is explicit and requires board publish endpoints", async () => {
     await expect(handleKlCommand(["agent-day", "--date", "2026-06-13"])).rejects.toThrow(
-      /supports only --dry-run/
+      /requires exactly one of --dry-run or --live/
     );
+    await expect(handleKlCommand(["agent-day", "--dry-run", "--live", "--date", "2026-06-13"])).rejects.toThrow(
+      /requires exactly one of --dry-run or --live/
+    );
+    await expect(handleKlCommand(["agent-day", "--live", "--date", "2026-06-13"])).rejects.toThrow(
+      /requires exactly one --multica-create-task-url/
+    );
+    await expect(
+      handleKlCommand([
+        "agent-day",
+        "--live",
+        "--date",
+        "2026-06-13",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks"
+      ])
+    ).rejects.toThrow(/requires exactly one --multica-add-comment-url/);
+  });
+
+  test("agent-day command validates mode and options", async () => {
     await expect(handleKlCommand(["agent-day", "--dry-run", "--date", "2026-02-31"])).rejects.toThrow(
       /Invalid agent date/
     );

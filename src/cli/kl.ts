@@ -19,6 +19,8 @@ import {
   parseAgentRole,
   type AgentDryRunPlan
 } from "../agents/dry-run.js";
+import { executeAgentDay, type AgentDayRunReport } from "../agents/day-runner.js";
+import { createFetchAgentReadClient, createHttpBoardClient, type AgentFetch } from "../agents/http-clients.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
@@ -57,6 +59,8 @@ export interface WritableSink {
 export interface KlHandlerIO {
   stdout?: WritableSink;
   stderr?: WritableSink;
+  fetch?: AgentFetch;
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface KlMockIngestCommandResult {
@@ -146,7 +150,13 @@ export interface KlAgentDayDryRunCommandResult {
   result: AgentDayDryRunPlan;
 }
 
-export type KlAgentDayCommandResult = KlAgentDayDryRunCommandResult;
+export interface KlAgentDayLiveCommandResult {
+  command: "agent-day";
+  mode: "live";
+  result: AgentDayRunReport;
+}
+
+export type KlAgentDayCommandResult = KlAgentDayDryRunCommandResult | KlAgentDayLiveCommandResult;
 
 export type KlCommandResult =
   | KlIngestCommandResult
@@ -162,7 +172,7 @@ class UsageError extends Error {
   readonly exitCode = 2;
 }
 
-export async function runKlCommand(argv: readonly string[]): Promise<KlCommandResult> {
+export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}): Promise<KlCommandResult> {
   const [command, ...args] = argv;
 
   if (command === "ingest") {
@@ -194,7 +204,7 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
   }
 
   if (command === "agent-day") {
-    return runAgentDayCommand(args);
+    return runAgentDayCommand(args, io);
   }
 
   throw new UsageError(
@@ -203,7 +213,7 @@ export async function runKlCommand(argv: readonly string[]): Promise<KlCommandRe
 }
 
 export async function handleKlCommand(argv: readonly string[], io: KlHandlerIO = {}): Promise<KlCommandResult> {
-  const result = await runKlCommand(argv);
+  const result = await runKlCommand(argv, io);
   io.stdout?.write(`${JSON.stringify(result, null, 2)}\n`);
   return result;
 }
@@ -427,15 +437,15 @@ function runAgentCommand(args: readonly string[]): KlAgentCommandResult {
   };
 }
 
-function runAgentDayCommand(args: readonly string[]): KlAgentDayCommandResult {
-  const { dryRun, options } = parseAgentDayOptions(args);
-  if (!dryRun) {
-    throw new UsageError("Command agent-day currently supports only --dry-run.");
+async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Promise<KlAgentDayCommandResult> {
+  const { dryRun, live, options } = parseAgentDayOptions(args);
+  if (dryRun === live) {
+    throw new UsageError("Command agent-day requires exactly one of --dry-run or --live.");
   }
 
   const config = loadOptionalAgentConfig(options, "agent-day");
   const date = requireOne(options, "--date", "agent-day");
-  const result = createAgentDayDryRunPlan(
+  const plan = createAgentDayDryRunPlan(
     agentDayInputFromConfig({
       config,
       overrides: agentDryRunOverrides(options, "agent-day"),
@@ -443,9 +453,32 @@ function runAgentDayCommand(args: readonly string[]): KlAgentDayCommandResult {
     })
   );
 
+  if (dryRun) {
+    return {
+      command: "agent-day",
+      mode: "dry-run",
+      result: plan
+    };
+  }
+
+  const env = io.env ?? process.env;
+  const result = await executeAgentDay(plan, "live", {
+    readClient: createFetchAgentReadClient({
+      fetch: io.fetch ?? globalThis.fetch,
+      bearerToken: optionalEnv(env, "KL_AGENT_READ_BEARER_TOKEN")
+    }),
+    boardClient: createHttpBoardClient({
+      fetch: io.fetch ?? globalThis.fetch,
+      boardId: plan.multicaBoard,
+      bearerToken: optionalEnv(env, "KL_MULTICA_BEARER_TOKEN"),
+      createTaskEndpointUrl: requireOne(options, "--multica-create-task-url", "agent-day"),
+      addCommentEndpointUrl: requireOne(options, "--multica-add-comment-url", "agent-day")
+    })
+  });
+
   return {
     command: "agent-day",
-    mode: "dry-run",
+    mode: "live",
     result
   };
 }
@@ -495,10 +528,24 @@ function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options:
   );
 }
 
-function parseAgentDayOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+function parseAgentDayOptions(args: readonly string[]): {
+  dryRun: boolean;
+  live: boolean;
+  options: Map<string, string[]>;
+} {
   return parseFlaggedOptions(
     args,
-    new Set(["--date", "--knowledge-loop-url", "--compass-health-url", "--adapter", "--board", "--config"]),
+    new Set([
+      "--live",
+      "--date",
+      "--knowledge-loop-url",
+      "--compass-health-url",
+      "--adapter",
+      "--board",
+      "--config",
+      "--multica-create-task-url",
+      "--multica-add-comment-url"
+    ]),
     "agent-day"
   );
 }
@@ -527,9 +574,10 @@ function parseFlaggedOptions(
   args: readonly string[],
   allowed: Set<string>,
   command: string
-): { dryRun: boolean; options: Map<string, string[]> } {
+): { dryRun: boolean; live: boolean; options: Map<string, string[]> } {
   const options = new Map<string, string[]>();
   let dryRun = false;
+  let live = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const name = args[index];
@@ -537,6 +585,10 @@ function parseFlaggedOptions(
 
     if (name === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (name === "--live" && allowed.has("--live")) {
+      live = true;
       continue;
     }
 
@@ -558,7 +610,13 @@ function parseFlaggedOptions(
     index += 1;
   }
 
-  return { dryRun, options };
+  return { dryRun, live, options };
+}
+
+function optionalEnv(env: Readonly<Record<string, string | undefined>>, name: string): string | undefined {
+  const value = env[name];
+
+  return value === undefined || value.length === 0 ? undefined : value;
 }
 
 function persistCommandTraceEvents(db: Database.Database, result: { traceEvents: readonly TraceEvent[] }): void {

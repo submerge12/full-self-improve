@@ -48,6 +48,27 @@ npm run kl -- agent-day --dry-run --date 2026-06-13
 
 Dry-run mode prints intended Multica actions and keeps `externalWrites` empty.
 
+## Manual Live Agent-Day Smoke (Gated)
+
+The manual trigger is available only with an explicit `--live` flag and explicit Multica publish endpoints. It is the M2 bridge toward the plan's "scheduler firing or manually triggered" criterion, but it does not by itself prove the two-day hands-free scheduler requirement.
+
+Keep bearer values in the local shell only:
+
+```powershell
+$env:KL_AGENT_READ_BEARER_TOKEN = "<local knowledge-loop token if required>"
+$env:KL_MULTICA_BEARER_TOKEN = "<local Multica token if required>"
+
+npm run kl -- agent-day --live `
+  --date 2026-06-13 `
+  --knowledge-loop-url http://127.0.0.1:3000 `
+  --compass-health-url http://127.0.0.1:8000 `
+  --board daily-plan `
+  --multica-create-task-url http://127.0.0.1:8080/api/issues `
+  --multica-add-comment-url http://127.0.0.1:8080/api/issues/<issue-id>/comments
+```
+
+The `--multica-add-comment-url` value must be a concrete endpoint confirmed against a running Multica instance. Because `config/multica/board-publish.example.json` is still `inferred_live_smoke_pending`, treat the issue/comment URLs as candidate wiring until a live smoke confirms the board contract.
+
 ## Live Gate
 
 Before enabling live publish, verify a running Multica self-host instance with a bearer-authenticated smoke test and confirm the workspace or issue-board identifiers. The live agent client must use HTTP endpoints only and must not read or write files in the Multica checkout.

@@ -146,6 +146,44 @@ export function createRouteManifestDocument(): ApiRouteManifestDocument {
   };
 }
 
+export function createRouteManifestMarkdown(): string {
+  const rows = API_ROUTE_MANIFEST.map(createRouteManifestMarkdownRow);
+
+  return [
+    "# knowledge-loop API routes",
+    "",
+    "Generated from `API_ROUTE_MANIFEST`.",
+    "",
+    "Bearer routes require `Authorization: Bearer <token>`.",
+    "Public read routes do not require a bearer token.",
+    "",
+    "| Route ID | Method | Path | Auth | Description |",
+    "| --- | --- | --- | --- | --- |",
+    ...rows,
+    ""
+  ].join("\n");
+}
+
+export function createRouteManifestMarkdownRow(route: ApiRouteManifestEntry): string {
+  const cells = [
+    codeTableCell(route.id),
+    codeTableCell(route.method),
+    codeTableCell(route.path),
+    codeTableCell(route.auth),
+    markdownTableCell(route.description)
+  ];
+
+  return `| ${cells.join(" | ")} |`;
+}
+
+function codeTableCell(value: string): string {
+  return `\`${markdownTableCell(value)}\``;
+}
+
+function markdownTableCell(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("|", "\\|");
+}
+
 function routeMatchesPath(route: ApiRouteManifestEntry, path: string): boolean {
   if (route.path === path) {
     return true;

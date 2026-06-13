@@ -5,6 +5,8 @@ import {
   ApiAuthConfigurationError,
   ApiAuthError,
   authorizeApiRequest,
+  createRouteManifestMarkdown,
+  createRouteManifestMarkdownRow,
   createRouteManifestDocument,
   findApiRoute,
   type ApiAuthMode,
@@ -153,5 +155,38 @@ describe("route manifest document", () => {
         auth: route.auth
       }))
     );
+  });
+
+  test("markdown is generated from the route manifest without count, identity, auth, or description drift", () => {
+    const markdown = createRouteManifestMarkdown();
+
+    expect(markdown.startsWith("# knowledge-loop API routes\n\n")).toBe(true);
+    expect(markdown.endsWith("\n")).toBe(true);
+
+    const rows = markdown
+      .split("\n")
+      .filter((line) => line.startsWith("| `") && !line.includes("---"));
+
+    expect(rows).toHaveLength(API_ROUTE_MANIFEST.length);
+    expect(rows).toEqual(API_ROUTE_MANIFEST.map((route) => createRouteManifestMarkdownRow(route)));
+  });
+
+  test("markdown documents bearer and public read authorization expectations", () => {
+    const markdown = createRouteManifestMarkdown();
+
+    expect(markdown).toContain("Bearer routes require `Authorization: Bearer <token>`.");
+    expect(markdown).toContain("Public read routes do not require a bearer token.");
+  });
+
+  test("markdown route rows escape table separators and backslashes", () => {
+    expect(
+      createRouteManifestMarkdownRow({
+        id: "quiz.grade",
+        method: "POST",
+        path: "/api/quiz/grade?kind=a|b\\c",
+        auth: "bearer",
+        description: "Grade A | B using C\\D."
+      })
+    ).toBe("| `quiz.grade` | `POST` | `/api/quiz/grade?kind=a\\|b\\\\c` | `bearer` | Grade A \\| B using C\\\\D. |");
   });
 });

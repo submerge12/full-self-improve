@@ -54,9 +54,9 @@ describe("adapter runtime config", () => {
     expect(refs.map((ref) => ref.path)).not.toContain("notes/draft-note.md");
   });
 
-  test("documents common draft directory patterns in the default excludes", () => {
+  test("documents Holly pending and common draft directory patterns in the default excludes", () => {
     expect(DEFAULT_MARKDOWN_VAULT_EXCLUDE).toEqual(
-      expect.arrayContaining(["draft/**", "**/drafts/**", "**/draft-*"])
+      expect.arrayContaining(["90_待确认/**", "draft/**", "**/drafts/**", "**/draft-*"])
     );
   });
 

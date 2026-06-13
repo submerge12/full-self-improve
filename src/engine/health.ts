@@ -11,7 +11,7 @@ export interface EngineHealthEnv {
   QWEN_API_KEY?: string;
 }
 
-export function getEngineHealth(env: EngineHealthEnv = process.env): EngineHealth {
+export function getEngineHealth(env: EngineHealthEnv = process.env as EngineHealthEnv): EngineHealth {
   return {
     status: "ok",
     mode: hasConfiguredProvider(env) ? "configured" : "mock"

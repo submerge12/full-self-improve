@@ -26,8 +26,10 @@ import {
   type KlCommandResult,
   type KlPersistentApplicationCommandResult,
   type KlPersistentQuizCommandResult,
+  type KlPersistentReviewCommandResult,
   type KlPersistentTeachbackCommandResult
 } from "./kl.js";
+import { upsertPersistentReviewSchedule } from "../engine/persistent-review.js";
 
 function createCapture(): { sink: { write(chunk: string | Uint8Array): boolean }; text(): string } {
   let output = "";
@@ -303,6 +305,39 @@ function createPlanDb(concepts: Array<{ slug: string; name: string; status?: Con
     applyMigrations(db);
     for (const concept of concepts) {
       createConcept(db, concept);
+    }
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
+function createReviewDb(
+  reviews: Array<{
+    slug: string;
+    name: string;
+    status?: ConceptStatus;
+    fsrsState: Record<string, unknown>;
+    dueAt: string;
+  }>
+): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-review-db-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    for (const review of reviews) {
+      const concept = createConcept(db, {
+        slug: review.slug,
+        name: review.name,
+        status: review.status ?? "generated"
+      });
+      upsertPersistentReviewSchedule(db, {
+        conceptId: concept.id,
+        fsrsState: review.fsrsState,
+        dueAt: review.dueAt
+      });
     }
   } finally {
     db.close();
@@ -599,6 +634,35 @@ function readApplicationRows(dbPath: string): {
   }
 }
 
+function readReviewRows(dbPath: string): Array<{
+  conceptSlug: string;
+  fsrsState: unknown;
+  dueAt: string;
+}> {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const rows = db
+      .prepare(
+        `SELECT
+           concepts.slug AS conceptSlug,
+           reviews.fsrs_state AS fsrsState,
+           reviews.due_at AS dueAt
+         FROM reviews
+         INNER JOIN concepts ON concepts.id = reviews.concept_id
+         ORDER BY reviews.id`
+      )
+      .all() as Array<{ conceptSlug: string; fsrsState: string; dueAt: string }>;
+
+    return rows.map((row) => ({
+      conceptSlug: row.conceptSlug,
+      fsrsState: JSON.parse(row.fsrsState) as unknown,
+      dueAt: row.dueAt
+    }));
+  } finally {
+    db.close();
+  }
+}
+
 function countMutableRows(dbPath: string): Record<CountableTable, number> {
   return {
     schema_migrations: countRows(dbPath, "schema_migrations"),
@@ -647,7 +711,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
   });
 
@@ -3403,6 +3467,270 @@ describe("kl CLI handler", () => {
     await expect(handleKlCommand(["plan", "--date", "2026-06-12"])).rejects.toThrow(
       /requires at least one --concept/
     );
+  });
+
+  test("review due-list mode lists due reviews and writes JSON", async () => {
+    const dbPath = createReviewDb([
+      { slug: "beta", name: "Beta", fsrsState: { card: "beta" }, dueAt: "2026-06-13T23:00:00.000Z" },
+      { slug: "gamma", name: "Gamma", status: "reviewed", fsrsState: { card: "gamma" }, dueAt: "2026-06-14T10:00:00.000Z" },
+      { slug: "alpha", name: "Alpha", fsrsState: { card: "alpha" }, dueAt: "2026-06-14T10:00:00.000Z" },
+      { slug: "future", name: "Future", fsrsState: { card: "future" }, dueAt: "2026-06-15T00:00:00.000Z" }
+    ]);
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14"], {
+      stdout: stdout.sink
+    })) as KlPersistentReviewCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result.command).toBe("review");
+    expect(result.mode).toBe("mock-persistent");
+    if (!("reviews" in result.result)) {
+      throw new Error("Expected review due-list result.");
+    }
+    const dueResult = result.result;
+    expect(dueResult).toEqual({
+      target: "2026-06-14",
+      reviews: [
+        expect.objectContaining({
+          conceptSlug: "beta",
+          conceptName: "Beta",
+          dueAt: "2026-06-13T23:00:00.000Z",
+          fsrsState: { card: "beta" }
+        }),
+        expect.objectContaining({
+          conceptSlug: "alpha",
+          conceptName: "Alpha",
+          dueAt: "2026-06-14T10:00:00.000Z",
+          fsrsState: { card: "alpha" }
+        }),
+        expect.objectContaining({
+          conceptSlug: "gamma",
+          conceptName: "Gamma",
+          dueAt: "2026-06-14T10:00:00.000Z",
+          fsrsState: { card: "gamma" }
+        })
+      ]
+    });
+    expect(dueResult.reviews.every((review) => Number.isSafeInteger(review.id))).toBe(true);
+    expect(dueResult.reviews.every((review) => Number.isSafeInteger(review.conceptId))).toBe(true);
+  });
+
+  test("review due-list mode honors limit", async () => {
+    const dbPath = createReviewDb([
+      { slug: "alpha", name: "Alpha", fsrsState: { card: "alpha" }, dueAt: "2026-06-14T01:00:00.000Z" },
+      { slug: "beta", name: "Beta", fsrsState: { card: "beta" }, dueAt: "2026-06-14T02:00:00.000Z" }
+    ]);
+
+    const result = (await handleKlCommand([
+      "review",
+      "--db",
+      dbPath,
+      "--due",
+      "2026-06-14",
+      "--limit",
+      "1"
+    ])) as KlPersistentReviewCommandResult;
+
+    expect(result.command).toBe("review");
+    expect(result.mode).toBe("mock-persistent");
+    if (!("reviews" in result.result)) {
+      throw new Error("Expected review due-list result.");
+    }
+    expect(result.result.reviews.map((review) => review.conceptSlug)).toEqual(["alpha"]);
+  });
+
+  test("review due-list rejects an unmigrated existing db without writing schema", async () => {
+    const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-review-unmigrated-"));
+    const dbPath = path.join(dbDir, "empty.db");
+    const db = new Database(dbPath);
+    db.close();
+
+    await expect(handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14"])).rejects.toThrow();
+
+    expect(listTableNames(dbPath)).toEqual([]);
+  });
+
+  test("review attempt mode records attempt updates review mastery and persists trace events", async () => {
+    const dbPath = createReviewDb([
+      {
+        slug: "spacing-effect",
+        name: "Spacing Effect",
+        fsrsState: { reviewCount: 2, lapses: 1, opaque: { scheduler: "mock" } },
+        dueAt: "2026-06-13T00:00:00.000Z"
+      }
+    ]);
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "review",
+        "--db",
+        dbPath,
+        "--concept",
+        "spacing-effect",
+        "--rating",
+        "good",
+        "--reviewed-at",
+        "2026-06-14T08:00:00+08:00"
+      ],
+      { stdout: stdout.sink }
+    )) as KlPersistentReviewCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result.command).toBe("review");
+    expect(result.mode).toBe("mock-persistent");
+    if (!("traceEvents" in result.result)) {
+      throw new Error("Expected review attempt result.");
+    }
+    const attemptResult = result.result;
+    expect(attemptResult).toMatchObject({
+      conceptSlug: "spacing-effect",
+      rating: "good",
+      reviewedAt: "2026-06-14T00:00:00.000Z",
+      previousDueAt: "2026-06-13T00:00:00.000Z",
+      nextDueAt: "2026-06-18T00:00:00.000Z",
+      masteryDelta: 0.06,
+      mastery: {
+        score: 0.06,
+        confidence: 0.8,
+        attemptsN: 1,
+        lastSeenAt: "2026-06-14T00:00:00.000Z"
+      }
+    });
+    expect(attemptResult.fsrsState).toEqual({
+      reviewCount: 3,
+      lapses: 1,
+      opaque: { scheduler: "mock" },
+      lastRating: "good",
+      lastReviewedAt: "2026-06-14T00:00:00.000Z",
+      nextIntervalDays: 4
+    });
+    expect(readReviewRows(dbPath)).toMatchObject([
+      {
+        conceptSlug: "spacing-effect",
+        dueAt: "2026-06-18T00:00:00.000Z",
+        fsrsState: attemptResult.fsrsState
+      }
+    ]);
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, attemptResult.runId, attemptResult.traceEvents);
+    expect(trace.result.events.map((event) => event.message)).toEqual(["Review attempt recorded", "Mastery updated"]);
+  });
+
+  test("review rejects missing duplicate mixed and invalid options", async () => {
+    const dbPath = createReviewDb([
+      { slug: "spacing-effect", name: "Spacing Effect", fsrsState: {}, dueAt: "2026-06-13T00:00:00.000Z" }
+    ]);
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["review", "--due", "2026-06-14"])).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand(["review", "--db", dbPath, "--db", otherDbPath, "--due", "2026-06-14"])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14", "--due", "2026-06-15"])
+    ).rejects.toThrow(/requires exactly one --due/);
+    await expect(
+      handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14", "--limit", "1", "--limit", "2"])
+    ).rejects.toThrow(/requires exactly one --limit/);
+    await expect(handleKlCommand(["review", "--db", dbPath])).rejects.toThrow(
+      /requires either due-list mode \(--due\) or attempt mode \(--concept, --rating, and --reviewed-at\)/
+    );
+    await expect(
+      handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14", "--concept", "spacing-effect"])
+    ).rejects.toThrow(/cannot mix due-list options with attempt options/);
+    await expect(
+      handleKlCommand(["review", "--db", dbPath, "--concept", "spacing-effect", "--rating", "good"])
+    ).rejects.toThrow(/attempt mode requires exactly one --concept, exactly one --rating, and exactly one --reviewed-at/);
+    await expect(
+      handleKlCommand([
+        "review",
+        "--db",
+        dbPath,
+        "--concept",
+        "spacing-effect",
+        "--concept",
+        "active-recall",
+        "--rating",
+        "good",
+        "--reviewed-at",
+        "2026-06-14T00:00:00.000Z"
+      ])
+    ).rejects.toThrow(/attempt mode requires exactly one --concept/);
+    await expect(
+      handleKlCommand([
+        "review",
+        "--db",
+        dbPath,
+        "--concept",
+        "spacing-effect",
+        "--rating",
+        "good",
+        "--rating",
+        "easy",
+        "--reviewed-at",
+        "2026-06-14T00:00:00.000Z"
+      ])
+    ).rejects.toThrow(/attempt mode requires exactly one --concept, exactly one --rating/);
+    await expect(
+      handleKlCommand([
+        "review",
+        "--db",
+        dbPath,
+        "--concept",
+        "spacing-effect",
+        "--rating",
+        "good",
+        "--reviewed-at",
+        "2026-06-14T00:00:00.000Z",
+        "--reviewed-at",
+        "2026-06-15T00:00:00.000Z"
+      ])
+    ).rejects.toThrow(/exactly one --reviewed-at/);
+    await expect(
+      handleKlCommand([
+        "review",
+        "--db",
+        dbPath,
+        "--concept",
+        "spacing-effect",
+        "--rating",
+        "later",
+        "--reviewed-at",
+        "2026-06-14T00:00:00.000Z"
+      ])
+    ).rejects.toThrow(/Invalid --rating value "later"/);
+    await expect(
+      handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14", "--limit", "0"])
+    ).rejects.toThrow(/Invalid --limit value "0"/);
+    await expect(handleKlCommand(["review", "--db", dbPath, "--due", "2026-06-14", "--bogus", "1"])).rejects.toThrow(
+      /Unknown option for review: --bogus/
+    );
+  });
+
+  test("review rejects invalid rating and limit before creating a missing db", async () => {
+    const invalidRatingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-review-invalid-rating-")), "missing.db");
+    const invalidLimitDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-review-invalid-limit-")), "missing.db");
+
+    await expect(
+      handleKlCommand([
+        "review",
+        "--db",
+        invalidRatingDbPath,
+        "--concept",
+        "spacing-effect",
+        "--rating",
+        "later",
+        "--reviewed-at",
+        "2026-06-14T00:00:00.000Z"
+      ])
+    ).rejects.toThrow(/Invalid --rating value "later"/);
+    await expect(
+      handleKlCommand(["review", "--db", invalidLimitDbPath, "--due", "2026-06-14", "--limit", "1.5"])
+    ).rejects.toThrow(/Invalid --limit value "1.5"/);
+
+    expect(existsSync(invalidRatingDbPath)).toBe(false);
+    expect(existsSync(invalidLimitDbPath)).toBe(false);
   });
 
   test("quiz grades exact answers and returns verdict plus mastery delta", async () => {

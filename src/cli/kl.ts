@@ -86,6 +86,13 @@ import {
   type PersistentQuizGradeResult
 } from "../engine/persistent-quiz.js";
 import {
+  listDuePersistentReviews,
+  recordPersistentReviewAttempt,
+  type PersistentReviewAttemptResult,
+  type PersistentReviewRating,
+  type PersistentReviewRecord
+} from "../engine/persistent-review.js";
+import {
   gradePersistentTeachback,
   type PersistentTeachbackGradeResult
 } from "../engine/persistent-teachback.js";
@@ -172,6 +179,19 @@ export interface KlPersistentDiagnoseCommandResult {
 }
 
 export type KlDiagnoseCommandResult = KlPersistentDiagnoseCommandResult;
+
+export interface KlPersistentReviewDueListResult {
+  target: string;
+  reviews: PersistentReviewRecord[];
+}
+
+export interface KlPersistentReviewCommandResult {
+  command: "review";
+  mode: "mock-persistent";
+  result: KlPersistentReviewDueListResult | PersistentReviewAttemptResult;
+}
+
+export type KlReviewCommandResult = KlPersistentReviewCommandResult;
 
 export interface KlPersistentTraceResult {
   runId: string;
@@ -370,6 +390,7 @@ export type KlCommandResult =
   | KlTeachbackCommandResult
   | KlApplicationCommandResult
   | KlDiagnoseCommandResult
+  | KlReviewCommandResult
   | KlTraceCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
@@ -416,6 +437,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runApplicationCommand(args);
   }
 
+  if (command === "review") {
+    return runReviewCommand(args);
+  }
+
   if (command === "agent") {
     return runAgentCommand(args);
   }
@@ -453,7 +478,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -809,6 +834,129 @@ function rejectMixedApplicationOptions(options: Map<string, string[]>): never {
 
 function hasOption(options: Map<string, string[]>, name: string): boolean {
   return (options.get(name) ?? []).length > 0;
+}
+
+type ReviewCliInput =
+  | {
+      mode: "due";
+      dbPath: string;
+      target: string;
+      limit?: number;
+    }
+  | {
+      mode: "attempt";
+      dbPath: string;
+      conceptSlug: string;
+      rating: PersistentReviewRating;
+      reviewedAt: string;
+    };
+
+function runReviewCommand(args: readonly string[]): KlReviewCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--due", "--limit", "--concept", "--rating", "--reviewed-at"]),
+    "review"
+  );
+  const input = parseReviewInput(options);
+
+  if (input.mode === "due") {
+    const db = new Database(input.dbPath, { readonly: true, fileMustExist: true });
+    try {
+      return {
+        command: "review",
+        mode: "mock-persistent",
+        result: {
+          target: input.target,
+          reviews: listDuePersistentReviews(db, {
+            target: input.target,
+            ...(input.limit === undefined ? {} : { limit: input.limit })
+          })
+        }
+      };
+    } finally {
+      db.close();
+    }
+  }
+
+  const db = new Database(input.dbPath, { fileMustExist: true });
+  try {
+    applyMigrations(db);
+    const result = recordPersistentReviewAttempt(db, {
+      conceptSlug: input.conceptSlug,
+      rating: input.rating,
+      reviewedAt: input.reviewedAt,
+      runId: createRunId("persistent-review")
+    });
+    persistCommandTraceEvents(db, result);
+
+    return {
+      command: "review",
+      mode: "mock-persistent",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function parseReviewInput(options: Map<string, string[]>): ReviewCliInput {
+  const dbPath = requireOne(options, "--db", "review");
+  const hasDueOptions = hasOption(options, "--due") || hasOption(options, "--limit");
+  const hasAttemptOptions = hasOption(options, "--concept") || hasOption(options, "--rating") || hasOption(options, "--reviewed-at");
+
+  if (hasDueOptions && hasAttemptOptions) {
+    throw new UsageError("Command review cannot mix due-list options with attempt options.");
+  }
+  if (hasDueOptions) {
+    return parseReviewDueInput(dbPath, options);
+  }
+  if (hasAttemptOptions) {
+    return parseReviewAttemptInput(dbPath, options);
+  }
+
+  throw new UsageError(
+    "Command review requires either due-list mode (--due) or attempt mode (--concept, --rating, and --reviewed-at)."
+  );
+}
+
+function parseReviewDueInput(dbPath: string, options: Map<string, string[]>): ReviewCliInput {
+  const target = requireOne(options, "--due", "review due-list mode");
+  const limitValue = optionalOne(options, "--limit", "review due-list mode");
+
+  return {
+    mode: "due",
+    dbPath,
+    target,
+    ...(limitValue === undefined ? {} : { limit: parsePositiveSafeInteger(limitValue, "--limit") })
+  };
+}
+
+function parseReviewAttemptInput(dbPath: string, options: Map<string, string[]>): ReviewCliInput {
+  const conceptValues = options.get("--concept") ?? [];
+  const ratingValues = options.get("--rating") ?? [];
+  const reviewedAtValues = options.get("--reviewed-at") ?? [];
+
+  if (conceptValues.length !== 1 || ratingValues.length !== 1 || reviewedAtValues.length !== 1) {
+    throw new UsageError(
+      "Command review attempt mode requires exactly one --concept, exactly one --rating, and exactly one --reviewed-at."
+    );
+  }
+
+  return {
+    mode: "attempt",
+    dbPath,
+    conceptSlug: conceptValues[0] as string,
+    rating: parseReviewRating(ratingValues[0] as string),
+    reviewedAt: reviewedAtValues[0] as string
+  };
+}
+
+function parseReviewRating(value: string): PersistentReviewRating {
+  if (value === "again" || value === "hard" || value === "good" || value === "easy") {
+    return value;
+  }
+
+  throw new UsageError(`Invalid --rating value "${value}". Expected one of: again, hard, good, easy.`);
 }
 
 function runAgentCommand(args: readonly string[]): KlAgentCommandResult {

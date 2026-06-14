@@ -103,6 +103,67 @@ function successfulApiBodyForUrl(url: string): Record<string, unknown> {
   return { ok: true, url };
 }
 
+function writeValidLiveSmokeManifestFixture(manifestPath: string, dates: readonly [string, string]): void {
+  writeFileSync(
+    manifestPath,
+    JSON.stringify(
+      {
+        contractStatus: "inferred_live_smoke_pending",
+        requiredConsecutiveDays: 2,
+        boardPublishConfig: "config/multica/board-publish.example.json",
+        smokeMode: "offline-contract-only",
+        evidence: {
+          days: dates.map((date) => ({
+            date,
+            items: [
+              {
+                role: "librarian",
+                phase: "nightly-ingest",
+                actionType: "add_comment",
+                title: `Librarian ingest report for ${date}`,
+                requiredSourceEndpoints: ["POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault"],
+                requiredBoardEvidence: ["commentUrl", "sourceLinks", "conceptCounts"]
+              },
+              {
+                role: "scholar",
+                phase: "morning-plan",
+                actionType: "create_task",
+                title: `Scholar study plan for ${date}`,
+                requiredSourceEndpoints: ["GET http://127.0.0.1:3000/api/plan/today"],
+                requiredBoardEvidence: ["taskUrl", "checklist", "sourceLinks"]
+              },
+              {
+                role: "nutritionist",
+                phase: "daily-meals",
+                actionType: "create_task",
+                title: `Nutrition plan for ${date}`,
+                requiredSourceEndpoints: [
+                  `GET http://127.0.0.1:8000/api/meal-plan/today?date=${date}`,
+                  "POST http://127.0.0.1:8000/api/meal-engine/procurement"
+                ],
+                requiredBoardEvidence: ["taskUrl", "mealChecklist", "sourceLinks"]
+              },
+              {
+                role: "scholar",
+                phase: "evening-mastery",
+                actionType: "add_comment",
+                title: `Scholar mastery report for ${date}`,
+                requiredSourceEndpoints: ["GET http://127.0.0.1:3000/api/mastery/summary"],
+                requiredBoardEvidence: ["commentUrl", "masteryDelta", "sourceLinks"]
+              }
+            ]
+          }))
+        },
+        nonCompletionNotice:
+          "This manifest is an offline live-smoke contract. It does not execute Multica, install a scheduler, prove live board posting, or close M2."
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+}
+
 function piHarnessPackageJson(): Record<string, unknown> {
   return {
     name: "pi-harness",
@@ -670,7 +731,7 @@ describe("kl CLI handler", () => {
         multicaBoard: "Holly Daily",
         status: "completed",
         totals: {
-          reads: 4,
+          reads: 5,
           publishedActions: 4,
           blockers: 0,
           publishFailures: 0
@@ -720,6 +781,7 @@ describe("kl CLI handler", () => {
       "http://knowledge.local/api/plan/today",
       "http://multica.local/api/tasks",
       "http://compass.local/api/meal-plan/today?date=2026-06-13",
+      "http://compass.local/api/meal-engine/procurement",
       "http://multica.local/api/tasks",
       "http://knowledge.local/api/mastery/summary",
       "http://multica.local/api/comments"
@@ -730,10 +792,20 @@ describe("kl CLI handler", () => {
       "Bearer knowledge-read-secret",
       "Bearer board-secret",
       "Bearer compass-read-secret",
+      "Bearer compass-read-secret",
       "Bearer board-secret",
       "Bearer knowledge-read-secret",
       "Bearer board-secret"
     ]);
+    expect(calls[5]?.init).toMatchObject({
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: "Bearer compass-read-secret"
+      },
+      body: JSON.stringify({ start_date: "2026-06-13" })
+    });
     for (const secret of ["knowledge-read-secret", "compass-read-secret", "fallback-read-secret", "board-secret"]) {
       expect(stdout.text()).not.toContain(secret);
     }
@@ -778,6 +850,7 @@ describe("kl CLI handler", () => {
       "Bearer board-secret",
       "Bearer legacy-read-secret",
       "Bearer board-secret",
+      "Bearer legacy-read-secret",
       "Bearer legacy-read-secret",
       "Bearer board-secret",
       "Bearer legacy-read-secret",
@@ -1095,7 +1168,7 @@ describe("kl CLI handler", () => {
           url: "http://127.0.0.1:3000/api/plan/today"
         },
         totals: {
-          reads: 3,
+          reads: 4,
           publishedActions: 4,
           blockers: 1,
           publishFailures: 0
@@ -1410,58 +1483,65 @@ describe("kl CLI handler", () => {
     ).rejects.toThrow(/only supports --runtime-package pi-harness/);
   });
 
-  test("agent-live-smoke dry-run validates the checked-in manifest without fetching", async () => {
+  test("agent-live-smoke dry-run validates a current manifest without fetching", async () => {
+    const manifestPath = "config/multica/live-smoke.valid.test.json";
+    writeValidLiveSmokeManifestFixture(manifestPath, ["2026-06-14", "2026-06-15"]);
     const stdout = createCapture();
-    const result = (await handleKlCommand(
-      [
-        "agent-live-smoke",
-        "--dry-run",
-        "--manifest",
-        "config/multica/live-smoke.example.json",
-        "--date",
-        "2026-06-14",
-        "--board",
-        "daily-plan"
-      ],
-      {
-        stdout: stdout.sink,
-        async fetch() {
-          throw new Error("live-smoke dry-run must not fetch");
-        }
-      }
-    )) as KlAgentLiveSmokeDryRunCommandResult;
 
-    expect(parseCapturedJson(stdout)).toEqual(result);
-    expect(result).toMatchObject({
-      command: "agent-live-smoke",
-      mode: "dry-run",
-      result: {
-        manifestPath: "config/multica/live-smoke.example.json",
-        date: "2026-06-14",
-        valid: true,
-        validation: {
-          errors: [],
-          summary: {
-            contractStatus: "inferred_live_smoke_pending",
-            requiredDays: 2,
-            expectedItems: [
-              "librarian:nightly-ingest:add_comment",
-              "scholar:morning-plan:create_task",
-              "nutritionist:daily-meals:create_task",
-              "scholar:evening-mastery:add_comment"
-            ]
+    try {
+      const result = (await handleKlCommand(
+        [
+          "agent-live-smoke",
+          "--dry-run",
+          "--manifest",
+          manifestPath,
+          "--date",
+          "2026-06-14",
+          "--board",
+          "daily-plan"
+        ],
+        {
+          stdout: stdout.sink,
+          async fetch() {
+            throw new Error("live-smoke dry-run must not fetch");
           }
-        },
-        nonCompletionNotice:
-          "This manifest is an offline live-smoke contract. It does not execute Multica, install a scheduler, prove live board posting, or close M2.",
-        plan: {
-          mode: "dry-run",
-          date: "2026-06-14",
-          multicaBoard: "daily-plan",
-          externalWrites: []
         }
-      }
-    });
+      )) as KlAgentLiveSmokeDryRunCommandResult;
+
+      expect(parseCapturedJson(stdout)).toEqual(result);
+      expect(result).toMatchObject({
+        command: "agent-live-smoke",
+        mode: "dry-run",
+        result: {
+          manifestPath,
+          date: "2026-06-14",
+          valid: true,
+          validation: {
+            errors: [],
+            summary: {
+              contractStatus: "inferred_live_smoke_pending",
+              requiredDays: 2,
+              expectedItems: [
+                "librarian:nightly-ingest:add_comment",
+                "scholar:morning-plan:create_task",
+                "nutritionist:daily-meals:create_task",
+                "scholar:evening-mastery:add_comment"
+              ]
+            }
+          },
+          nonCompletionNotice:
+            "This manifest is an offline live-smoke contract. It does not execute Multica, install a scheduler, prove live board posting, or close M2.",
+          plan: {
+            mode: "dry-run",
+            date: "2026-06-14",
+            multicaBoard: "daily-plan",
+            externalWrites: []
+          }
+        }
+      });
+    } finally {
+      unlinkIfExists(manifestPath);
+    }
   });
 
   test("agent-live-smoke dry-run returns validation errors for an invalid manifest", async () => {
@@ -1558,105 +1638,119 @@ describe("kl CLI handler", () => {
   });
 
   test("agent-preflight dry-run combines schedule intent and live-smoke validation without fetching", async () => {
+    const manifestPath = "config/multica/live-smoke.valid.test.json";
+    writeValidLiveSmokeManifestFixture(manifestPath, ["2026-06-14", "2026-06-15"]);
     const stdout = createCapture();
-    const result = (await handleKlCommand(
-      [
+
+    try {
+      const result = (await handleKlCommand(
+        [
+          "agent-preflight",
+          "--dry-run",
+          "--now",
+          "2026-06-14T07:30:00+08:00",
+          "--timezone",
+          "Asia/Shanghai",
+          "--daily-at",
+          "07:30",
+          "--manifest",
+          manifestPath,
+          "--config",
+          "config/agents.example.json"
+        ],
+        {
+          stdout: stdout.sink,
+          async fetch() {
+            throw new Error("preflight dry-run must not fetch");
+          }
+        }
+      )) as KlAgentPreflightDryRunCommandResult;
+
+      expect(parseCapturedJson(stdout)).toEqual(result);
+      expect(result).toMatchObject({
+        command: "agent-preflight",
+        mode: "dry-run",
+        result: {
+          status: "ready_for_live_smoke",
+          date: "2026-06-14",
+          nonCompletionNotice:
+            "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.",
+          schedule: {
+            due: true,
+            date: "2026-06-14",
+            wouldRun: {
+              command: "agent-day",
+              mode: "dry-run"
+            },
+            plan: {
+              mode: "dry-run",
+              externalWrites: []
+            }
+          },
+          liveSmoke: {
+            manifestPath,
+            valid: true,
+            manifestEvidenceDays: ["2026-06-14", "2026-06-15"],
+            validation: {
+              errors: []
+            }
+          }
+        }
+      });
+      expect(result.result.offlineChecks).toEqual([
+        expect.objectContaining({ id: "scheduler_due", status: "passed" }),
+        expect.objectContaining({ id: "live_smoke_manifest_valid", status: "passed" }),
+        expect.objectContaining({ id: "manifest_starts_on_schedule_date", status: "passed" })
+      ]);
+      expect(result.result.requiredLiveProofs.map((proof) => proof.id)).toEqual([
+        "multica_self_host_verified",
+        "pi_harness_dependency_clean",
+        "two_consecutive_hands_free_board_days",
+        "failure_blocker_board_comment",
+        "evening_mastery_delta_matches_api",
+        "daily_cost_visible"
+      ]);
+      expect(result.result.requiredLiveProofs.every((proof) => proof.status === "not_verified_offline")).toBe(true);
+    } finally {
+      unlinkIfExists(manifestPath);
+    }
+  });
+
+  test("agent-preflight blocks when the manifest first day differs from the scheduler date", async () => {
+    const manifestPath = "config/multica/live-smoke.valid.test.json";
+    writeValidLiveSmokeManifestFixture(manifestPath, ["2026-06-14", "2026-06-15"]);
+
+    try {
+      const result = (await handleKlCommand([
         "agent-preflight",
         "--dry-run",
         "--now",
-        "2026-06-14T07:30:00+08:00",
+        "2026-06-15T07:30:00+08:00",
         "--timezone",
         "Asia/Shanghai",
         "--daily-at",
         "07:30",
         "--manifest",
-        "config/multica/live-smoke.example.json",
+        manifestPath,
         "--config",
         "config/agents.example.json"
-      ],
-      {
-        stdout: stdout.sink,
-        async fetch() {
-          throw new Error("preflight dry-run must not fetch");
-        }
-      }
-    )) as KlAgentPreflightDryRunCommandResult;
+      ])) as KlAgentPreflightDryRunCommandResult;
 
-    expect(parseCapturedJson(stdout)).toEqual(result);
-    expect(result).toMatchObject({
-      command: "agent-preflight",
-      mode: "dry-run",
-      result: {
-        status: "ready_for_live_smoke",
-        date: "2026-06-14",
-        nonCompletionNotice:
-          "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.",
-        schedule: {
-          due: true,
-          date: "2026-06-14",
-          wouldRun: {
-            command: "agent-day",
-            mode: "dry-run"
-          },
-          plan: {
-            mode: "dry-run",
-            externalWrites: []
-          }
-        },
-        liveSmoke: {
-          manifestPath: "config/multica/live-smoke.example.json",
-          valid: true,
-          manifestEvidenceDays: ["2026-06-14", "2026-06-15"],
-          validation: {
-            errors: []
-          }
-        }
-      }
-    });
-    expect(result.result.offlineChecks).toEqual([
-      expect.objectContaining({ id: "scheduler_due", status: "passed" }),
-      expect.objectContaining({ id: "live_smoke_manifest_valid", status: "passed" }),
-      expect.objectContaining({ id: "manifest_starts_on_schedule_date", status: "passed" })
-    ]);
-    expect(result.result.requiredLiveProofs.map((proof) => proof.id)).toEqual([
-      "multica_self_host_verified",
-      "pi_harness_dependency_clean",
-      "two_consecutive_hands_free_board_days",
-      "failure_blocker_board_comment",
-      "evening_mastery_delta_matches_api",
-      "daily_cost_visible"
-    ]);
-    expect(result.result.requiredLiveProofs.every((proof) => proof.status === "not_verified_offline")).toBe(true);
-  });
-
-  test("agent-preflight blocks when the manifest first day differs from the scheduler date", async () => {
-    const result = (await handleKlCommand([
-      "agent-preflight",
-      "--dry-run",
-      "--now",
-      "2026-06-15T07:30:00+08:00",
-      "--timezone",
-      "Asia/Shanghai",
-      "--daily-at",
-      "07:30",
-      "--manifest",
-      "config/multica/live-smoke.example.json",
-      "--config",
-      "config/agents.example.json"
-    ])) as KlAgentPreflightDryRunCommandResult;
-
-    expect(result.result.status).toBe("blocked");
-    expect(result.result.date).toBe("2026-06-15");
-    expect(result.result.liveSmoke.valid).toBe(true);
-    expect(result.result.offlineChecks).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          id: "manifest_starts_on_schedule_date",
-          status: "blocked",
-          detail: "Manifest first evidence day 2026-06-14 must match scheduler date 2026-06-15."
-        })
-      ])
-    );
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.date).toBe("2026-06-15");
+      expect(result.result.liveSmoke.valid).toBe(true);
+      expect(result.result.offlineChecks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "manifest_starts_on_schedule_date",
+            status: "blocked",
+            detail: "Manifest first evidence day 2026-06-14 must match scheduler date 2026-06-15."
+          })
+        ])
+      );
+    } finally {
+      unlinkIfExists(manifestPath);
+    }
   });
 
   test("agent-preflight command validates dry-run mode and rejects live mode", async () => {

@@ -29,7 +29,10 @@
             "phase": "daily-meals",
             "actionType": "create_task",
             "title": "Nutrition plan for 2026-06-14",
-            "requiredSourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-14"],
+            "requiredSourceEndpoints": [
+              "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-14",
+              "POST http://127.0.0.1:8000/api/meal-engine/procurement"
+            ],
             "requiredBoardEvidence": ["taskUrl", "mealChecklist", "sourceLinks"]
           },
           {
@@ -66,7 +69,10 @@
             "phase": "daily-meals",
             "actionType": "create_task",
             "title": "Nutrition plan for 2026-06-15",
-            "requiredSourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-15"],
+            "requiredSourceEndpoints": [
+              "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-15",
+              "POST http://127.0.0.1:8000/api/meal-engine/procurement"
+            ],
             "requiredBoardEvidence": ["taskUrl", "mealChecklist", "sourceLinks"]
           },
           {

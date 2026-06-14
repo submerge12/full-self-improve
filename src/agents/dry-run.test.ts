@@ -78,7 +78,7 @@ describe("agent dry-run profiles", () => {
     });
   });
 
-  test("Nutritionist dry-run plans a read-only compass-health meal fetch", () => {
+  test("Nutritionist dry-run plans compass-health meal and procurement reads", () => {
     const plan = createAgentDryRunPlan({
       role: "nutritionist",
       date: "2026-06-13",
@@ -90,6 +90,12 @@ describe("agent dry-run profiles", () => {
       expect.objectContaining({
         method: "GET",
         url: "http://compass.local/api/meal-plan/today?date=2026-06-13"
+      }),
+      expect.objectContaining({
+        method: "POST",
+        url: "http://compass.local/api/meal-engine/procurement",
+        jsonBody: { start_date: "2026-06-13" },
+        purpose: expect.stringMatching(/shopping|procurement/i)
       })
     ]);
     expect(plan.intendedActions[0]).toMatchObject({
@@ -97,6 +103,10 @@ describe("agent dry-run profiles", () => {
       title: "Nutrition plan for 2026-06-13",
       checklist: ["Fetch meals", "Post meal checklist", "Post shopping list"]
     });
+    expect(plan.intendedActions[0]?.sourceEndpoints).toEqual([
+      "GET http://compass.local/api/meal-plan/today?date=2026-06-13",
+      "POST http://compass.local/api/meal-engine/procurement"
+    ]);
   });
 
   test("Nutritionist dry-run supports a configurable meal read URL template", () => {
@@ -111,10 +121,16 @@ describe("agent dry-run profiles", () => {
       expect.objectContaining({
         method: "GET",
         url: "http://compass.local/api/meal-plan/week?date=2026-06-13"
+      }),
+      expect.objectContaining({
+        method: "POST",
+        url: "http://compass.local/api/meal-engine/procurement",
+        jsonBody: { start_date: "2026-06-13" }
       })
     ]);
     expect(plan.intendedActions[0]?.sourceEndpoints).toEqual([
-      "GET http://compass.local/api/meal-plan/week?date=2026-06-13"
+      "GET http://compass.local/api/meal-plan/week?date=2026-06-13",
+      "POST http://compass.local/api/meal-engine/procurement"
     ]);
   });
 
@@ -165,6 +181,7 @@ describe("agent dry-run profiles", () => {
       "POST http://127.0.0.1:3124/api/ingest/run?adapter=holly-vault",
       "GET http://127.0.0.1:3124/api/plan/today",
       "GET http://compass.local/api/meal-plan/today?date=2026-06-13",
+      "POST http://compass.local/api/meal-engine/procurement",
       "GET http://127.0.0.1:3124/api/mastery/summary"
     ]);
     expect(plan.intendedActions.map((action) => action.title)).toEqual([

@@ -84,8 +84,10 @@ describe("agent day runner", () => {
       "POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault",
       "GET http://127.0.0.1:3000/api/plan/today",
       "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13",
+      "POST http://127.0.0.1:8000/api/meal-engine/procurement",
       "GET http://127.0.0.1:3000/api/mastery/summary"
     ]);
+    expect(reads[3]).toMatchObject({ jsonBody: { start_date: "2026-06-13" } });
     expect(report.publishedActions.map((publish) => publish.action.title)).toEqual([
       "Librarian ingest report for 2026-06-13",
       "Scholar study plan for 2026-06-13",
@@ -96,7 +98,7 @@ describe("agent day runner", () => {
     expect(report.publishFailures).toEqual([]);
     expect(report.skipped).toEqual([]);
     expect(report.totals).toEqual({
-      reads: 4,
+      reads: 5,
       publishedActions: 4,
       blockers: 0,
       publishFailures: 0
@@ -107,6 +109,7 @@ describe("agent day runner", () => {
       "read:GET http://127.0.0.1:3000/api/plan/today",
       "publish:Scholar study plan for 2026-06-13",
       "read:GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13",
+      "read:POST http://127.0.0.1:8000/api/meal-engine/procurement",
       "publish:Nutrition plan for 2026-06-13",
       "read:GET http://127.0.0.1:3000/api/mastery/summary",
       "publish:Scholar mastery report for 2026-06-13"
@@ -271,7 +274,7 @@ describe("agent day runner", () => {
     expect(report.blockers[0]?.body).not.toContain(secret);
     expect(report.blockers[0]?.body).not.toContain("G:\\pi-harness");
     expect(report.totals).toEqual({
-      reads: 3,
+      reads: 4,
       publishedActions: 4,
       blockers: 1,
       publishFailures: 0
@@ -329,7 +332,7 @@ describe("agent day runner", () => {
     expect(report.publishFailures[0]?.message).not.toContain("G:\\pi-harness");
     expect(report.entries[1]?.publishFailures).toHaveLength(1);
     expect(report.totals).toEqual({
-      reads: 3,
+      reads: 4,
       publishedActions: 3,
       blockers: 1,
       publishFailures: 1
@@ -378,7 +381,7 @@ describe("agent day runner", () => {
     expect(report.publishFailures[0]?.message).not.toContain("G:\\multica");
     expect(report.entries[1]?.publishFailures).toHaveLength(1);
     expect(report.totals).toEqual({
-      reads: 4,
+      reads: 5,
       publishedActions: 3,
       blockers: 0,
       publishFailures: 1

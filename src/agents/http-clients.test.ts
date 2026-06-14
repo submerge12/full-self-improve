@@ -75,13 +75,42 @@ describe("agent HTTP clients", () => {
     expect(spy.calls).toHaveLength(1);
     expect(spy.calls[0]?.input).toBe(endpoint.url);
     expect(spy.calls[0]?.init).toMatchObject({
+      method: "POST"
+    });
+    expect(spy.calls[0]?.init?.headers).toEqual({
+      Accept: "application/json",
+      Authorization: "Bearer test-bearer"
+    });
+    expect(spy.calls[0]?.init).not.toHaveProperty("body");
+  });
+
+  test("read client sends JSON body only for endpoint plans with jsonBody", async () => {
+    const spy = createSpyFetch([jsonResponse({ items: ["rice"] })]);
+    const client = createFetchAgentReadClient({
+      fetch: spy.fetch,
+      bearerToken: "test-bearer"
+    });
+    const endpoint = {
+      method: "POST",
+      url: "http://127.0.0.1:8000/api/meal-engine/procurement",
+      purpose: "Fetch shopping/procurement list",
+      jsonBody: { start_date: "2026-06-13" }
+    } as const;
+
+    const result = await client.read(endpoint);
+
+    expect(result).toEqual({ endpoint, status: 200, body: { items: ["rice"] } });
+    expect(spy.calls).toHaveLength(1);
+    expect(spy.calls[0]?.input).toBe(endpoint.url);
+    expect(spy.calls[0]?.init).toMatchObject({
       method: "POST",
       headers: {
         Accept: "application/json",
+        "Content-Type": "application/json",
         Authorization: "Bearer test-bearer"
-      }
+      },
+      body: JSON.stringify({ start_date: "2026-06-13" })
     });
-    expect(spy.calls[0]?.init).not.toHaveProperty("body");
   });
 
   test("read client uses endpoint-origin bearer tokens before fallback bearer", async () => {

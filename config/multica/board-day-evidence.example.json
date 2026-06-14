@@ -39,7 +39,10 @@
           "phase": "daily-meals",
           "actionType": "create_task",
           "title": "Nutrition plan for 2026-06-14",
-          "sourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-14"],
+          "sourceEndpoints": [
+            "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-14",
+            "POST http://127.0.0.1:8000/api/meal-engine/procurement"
+          ],
           "boardEvidence": {
             "taskUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1003",
             "mealChecklist": ["Breakfast logged", "Lunch planned", "Dinner planned", "Hydration checked"],
@@ -102,7 +105,10 @@
           "phase": "daily-meals",
           "actionType": "create_task",
           "title": "Nutrition plan for 2026-06-15",
-          "sourceEndpoints": ["GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-15"],
+          "sourceEndpoints": [
+            "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-15",
+            "POST http://127.0.0.1:8000/api/meal-engine/procurement"
+          ],
           "boardEvidence": {
             "taskUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1013",
             "mealChecklist": ["Breakfast logged", "Lunch planned", "Dinner planned", "Hydration checked"],

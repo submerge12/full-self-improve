@@ -21,7 +21,7 @@ describe("agent failure smoke report", () => {
         url: "http://127.0.0.1:3000/api/plan/today"
       },
       totals: {
-        reads: 3,
+        reads: 4,
         publishedActions: 4,
         blockers: 1,
         publishFailures: 0
@@ -95,6 +95,7 @@ describe("agent failure smoke report", () => {
       "read:GET http://127.0.0.1:3000/api/plan/today",
       "publish:Agent blocked for 2026-06-13",
       "read:GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13",
+      "read:POST http://127.0.0.1:8000/api/meal-engine/procurement",
       "publish:Nutrition plan for 2026-06-13",
       "read:GET http://127.0.0.1:3000/api/mastery/summary",
       "publish:Scholar mastery report for 2026-06-13"

@@ -30,6 +30,7 @@ export interface AgentEndpointPlan {
   readonly method: "GET" | "POST";
   readonly url: string;
   readonly purpose: string;
+  readonly jsonBody?: Record<string, unknown>;
 }
 
 export interface AgentIntendedAction {
@@ -207,7 +208,13 @@ function externalReadsFor(input: AgentDryRunInput, phase: AgentPhase): AgentEndp
         template: input.nutritionistMealReadUrlTemplate ?? DEFAULT_NUTRITIONIST_MEAL_READ_URL_TEMPLATE,
         date: input.date
       }),
-      purpose: "Fetch today's meals and shopping list through the existing compass-health API."
+      purpose: "Fetch today's meals through the existing compass-health API."
+    },
+    {
+      method: "POST",
+      url: `${compassHealthBaseUrl}/api/meal-engine/procurement`,
+      purpose: "Fetch today's shopping/procurement list through the existing compass-health API.",
+      jsonBody: { start_date: input.date }
     }
   ];
 }

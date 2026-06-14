@@ -91,7 +91,8 @@ async function readEndpoint(
   try {
     response = await options.fetch(endpoint.url, {
       method: endpoint.method,
-      headers: headersFor(bearerToken)
+      headers: headersFor(bearerToken, endpoint.jsonBody === undefined ? undefined : "json"),
+      ...(endpoint.jsonBody === undefined ? {} : { body: JSON.stringify(endpoint.jsonBody) })
     });
   } catch (error) {
     throw new AgentHttpError(

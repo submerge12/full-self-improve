@@ -1,0 +1,6 @@
+## Step 1
+
+What I did: Added agent endpoint JSON bodies, added the Nutritionist procurement POST read after the meal-plan GET, updated live read client JSON request handling, and adjusted tests for 5 reads/4 publishes.
+Files modified: [src/agents/dry-run.ts, src/agents/dry-run.test.ts, src/agents/http-clients.ts, src/agents/http-clients.test.ts, src/agents/day-runner.test.ts, src/cli/kl.test.ts, src/cli/agent-config.test.ts]
+Test status: passing - RED: focused unit suite failed 12 tests before production changes; GREEN: `npm run test:unit -- src/agents/dry-run.test.ts src/agents/http-clients.test.ts src/agents/day-runner.test.ts src/cli/kl.test.ts src/cli/agent-config.test.ts` passed 130/130. Follow-up RED: `npm run test:unit -- src/agents/failure-smoke.test.ts` failed 2 stale expectation tests after controller included failure smoke; follow-up GREEN: `npm run test:unit -- src/agents/failure-smoke.test.ts src/agents/day-runner.test.ts src/agents/dry-run.test.ts src/agents/http-clients.test.ts src/cli/kl.test.ts src/cli/agent-config.test.ts` passed 134/134. Review hardening: body-free POST ingest test now asserts exact read headers so Content-Type cannot slip through.
+Next step: Ready for controller review after rerunning requested verification.

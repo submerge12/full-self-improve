@@ -215,7 +215,10 @@ type HealthCountableTable =
   | "health_metrics"
   | "health_metric_audit_events"
   | "health_metric_imports"
-  | "health_trace_events";
+  | "health_trace_events"
+  | "exercise_templates"
+  | "exercise_plans"
+  | "exercise_sessions";
 
 interface TraceCliCommandResult {
   command: "trace";
@@ -242,6 +245,13 @@ interface HealthMetricCliCommandResult {
   command: "health-metric";
   mode: "mock-persistent";
   action: "add" | "list" | "update" | "import-csv";
+  result: unknown;
+}
+
+interface HealthExerciseCliCommandResult {
+  command: "health-exercise";
+  mode: "mock-persistent";
+  action: "template.create" | "plan.create" | "complete" | "completion";
   result: unknown;
 }
 
@@ -278,6 +288,16 @@ function countHealthRows(dbPath: string, table: HealthCountableTable): number {
   } finally {
     db.close();
   }
+}
+
+function countHealthExerciseRows(dbPath: string): Record<"templates" | "plans" | "sessions" | "healthTraces" | "legacyTraces", number> {
+  return {
+    templates: countHealthRows(dbPath, "exercise_templates"),
+    plans: countHealthRows(dbPath, "exercise_plans"),
+    sessions: countHealthRows(dbPath, "exercise_sessions"),
+    healthTraces: countHealthRows(dbPath, "health_trace_events"),
+    legacyTraces: countRows(dbPath, "trace_events")
+  };
 }
 
 async function readTraceRun(dbPath: string, runId: string): Promise<TraceCliCommandResult> {
@@ -747,7 +767,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
   });
 
@@ -1214,6 +1234,384 @@ describe("kl CLI handler", () => {
     await expect(
       handleKlCommand(["health-metric", "add", "--db", dbPath, "--metric", "weight", "--bogus", "1"])
     ).rejects.toThrow(/Unknown option for health-metric add: --bogus/);
+  });
+
+  test("health-exercise creates a template plan completion and read summary without legacy traces", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-exercise-flow-")), "exercise.db");
+    const templateStdout = createCapture();
+
+    const template = (await handleKlCommand(
+      [
+        "health-exercise",
+        "template",
+        "create",
+        "--db",
+        dbPath,
+        "--slug",
+        "starter-strength",
+        "--name",
+        "Starter Strength",
+        "--day",
+        "0:push:Push:20",
+        "--day",
+        "2:pull:Pull:30"
+      ],
+      { stdout: templateStdout.sink }
+    )) as unknown as HealthExerciseCliCommandResult;
+
+    expect(parseCapturedJson(templateStdout)).toEqual(template);
+    expect(template).toMatchObject({
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "template.create",
+      result: {
+        created: true,
+        template: {
+          id: 1,
+          slug: "starter-strength",
+          name: "Starter Strength",
+          defaultDays: [
+            { dayOffset: 0, sessionKey: "push", title: "Push", targetMinutes: 20 },
+            { dayOffset: 2, sessionKey: "pull", title: "Pull", targetMinutes: 30 }
+          ]
+        }
+      }
+    });
+
+    const plan = (await handleKlCommand([
+      "health-exercise",
+      "plan",
+      "create",
+      "--db",
+      dbPath,
+      "--template",
+      "starter-strength",
+      "--week-start",
+      "2026-06-15"
+    ])) as unknown as HealthExerciseCliCommandResult;
+    const planResult = plan.result as { sessions: Array<{ id: number; durationMinutes: number }> };
+
+    expect(plan).toMatchObject({
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "plan.create",
+      result: {
+        plan: { id: 1, weekStart: "2026-06-15", status: "active" },
+        sessions: [
+          { id: 1, templateSessionKey: "push", status: "planned", durationMinutes: 20 },
+          { id: 2, templateSessionKey: "pull", status: "planned", durationMinutes: 30 }
+        ]
+      }
+    });
+
+    const complete = (await handleKlCommand([
+      "health-exercise",
+      "complete",
+      "--db",
+      dbPath,
+      "--session-id",
+      String(planResult.sessions[0]!.id),
+      "--completed-at",
+      "2026-06-15T09:00:00.000Z",
+      "--duration-minutes",
+      "20",
+      "--intensity",
+      "moderate"
+    ])) as unknown as HealthExerciseCliCommandResult;
+
+    expect(complete).toMatchObject({
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "complete",
+      result: {
+        session: {
+          id: 1,
+          status: "completed",
+          completedAt: "2026-06-15T09:00:00.000Z",
+          durationMinutes: 20,
+          intensity: "moderate"
+        }
+      }
+    });
+
+    const completionStdout = createCapture();
+    const completion = (await handleKlCommand(
+      [
+        "health-exercise",
+        "completion",
+        "--db",
+        dbPath,
+        "--from",
+        "2026-06-15",
+        "--to",
+        "2026-06-22"
+      ],
+      { stdout: completionStdout.sink }
+    )) as unknown as HealthExerciseCliCommandResult;
+
+    expect(parseCapturedJson(completionStdout)).toEqual(completion);
+    expect(completion).toMatchObject({
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "completion",
+      result: {
+        planned: 2,
+        completed: 1,
+        missed: 1,
+        rate: 0.5,
+        sessions: [{ status: "completed" }, { status: "missed" }],
+        adHocSessions: []
+      }
+    });
+    expect(countHealthExerciseRows(dbPath)).toEqual({
+      templates: 1,
+      plans: 1,
+      sessions: 2,
+      healthTraces: 0,
+      legacyTraces: 0
+    });
+  });
+
+  test("health-exercise plan create does not create a missing database", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-exercise-missing-plan-")), "missing.db");
+
+    await expect(
+      handleKlCommand([
+        "health-exercise",
+        "plan",
+        "create",
+        "--db",
+        missingDbPath,
+        "--template",
+        "starter-strength",
+        "--week-start",
+        "2026-06-15"
+      ])
+    ).rejects.toThrow(/Health exercise database does not exist/);
+
+    expect(existsSync(missingDbPath)).toBe(false);
+  });
+
+  test("health-exercise completion opens read-only and does not mutate database rows", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-exercise-readonly-")), "exercise.db");
+    await handleKlCommand([
+      "health-exercise",
+      "template",
+      "create",
+      "--db",
+      dbPath,
+      "--slug",
+      "starter-strength",
+      "--name",
+      "Starter Strength",
+      "--day",
+      "0:push:Push:20"
+    ]);
+    await handleKlCommand([
+      "health-exercise",
+      "plan",
+      "create",
+      "--db",
+      dbPath,
+      "--template",
+      "starter-strength",
+      "--week-start",
+      "2026-06-15"
+    ]);
+    const beforeRows = countHealthExerciseRows(dbPath);
+
+    const result = (await handleKlCommand([
+      "health-exercise",
+      "completion",
+      "--db",
+      dbPath,
+      "--from",
+      "2026-06-15",
+      "--to",
+      "2026-06-22"
+    ])) as unknown as HealthExerciseCliCommandResult;
+
+    expect(result).toMatchObject({
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "completion",
+      result: { planned: 1, completed: 0, missed: 1, rate: 0 }
+    });
+    expect(countHealthExerciseRows(dbPath)).toEqual(beforeRows);
+  });
+
+  test("health-exercise rejects invalid day target mode intensity and dates before creating missing databases", async () => {
+    const cases: Array<{
+      readonly name: string;
+      readonly argv: readonly string[];
+      readonly error: RegExp;
+    }> = [
+      {
+        name: "day target",
+        argv: [
+          "health-exercise",
+          "template",
+          "create",
+          "--slug",
+          "starter-strength",
+          "--name",
+          "Starter Strength",
+          "--day",
+          "0:push:Push:not-a-number"
+        ],
+        error: /Invalid --day value/
+      },
+      {
+        name: "negative day",
+        argv: [
+          "health-exercise",
+          "template",
+          "create",
+          "--slug",
+          "starter-strength",
+          "--name",
+          "Starter Strength",
+          "--day",
+          "-1:push:Push:20"
+        ],
+        error: /Invalid --day value/
+      },
+      {
+        name: "partial target",
+        argv: [
+          "health-exercise",
+          "complete",
+          "--plan-id",
+          "1",
+          "--completed-at",
+          "2026-06-15T09:00:00.000Z"
+        ],
+        error: /completion target must be sessionId, planId with templateSessionKey, or omitted/
+      },
+      {
+        name: "mixed target",
+        argv: [
+          "health-exercise",
+          "complete",
+          "--session-id",
+          "1",
+          "--plan-id",
+          "1",
+          "--template-session-key",
+          "push",
+          "--completed-at",
+          "2026-06-15T09:00:00.000Z"
+        ],
+        error: /completion target must be sessionId, planId with templateSessionKey, or omitted/
+      },
+      {
+        name: "intensity",
+        argv: [
+          "health-exercise",
+          "complete",
+          "--completed-at",
+          "2026-06-15T09:00:00.000Z",
+          "--intensity",
+          "extreme"
+        ],
+        error: /Invalid --intensity value/
+      },
+      {
+        name: "completed-at",
+        argv: ["health-exercise", "complete", "--completed-at", "2026-06-15"],
+        error: /Invalid --completed-at value/
+      },
+      {
+        name: "completion from",
+        argv: ["health-exercise", "completion", "--from", "2026-02-31", "--to", "2026-06-22"],
+        error: /Invalid --from value/
+      }
+    ];
+
+    for (const testCase of cases) {
+      const dbPath = path.join(
+        mkdtempSync(path.join(tmpdir(), `kl-cli-health-exercise-invalid-${testCase.name.replace(/\s+/g, "-")}-`)),
+        "missing.db"
+      );
+      const dbInsertIndex = testCase.argv[1] === "template" || testCase.argv[1] === "plan" ? 3 : 2;
+      const argv = [
+        ...testCase.argv.slice(0, dbInsertIndex),
+        "--db",
+        dbPath,
+        ...testCase.argv.slice(dbInsertIndex)
+      ];
+
+      await expect(handleKlCommand(argv)).rejects.toThrow(testCase.error);
+      expect(existsSync(dbPath)).toBe(false);
+    }
+  });
+
+  test("health-exercise rejects unknown missing and duplicate options", async () => {
+    const dbPath = createHealthMetricDb();
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["health-exercise"])).rejects.toThrow(/requires one action/);
+    await expect(
+      handleKlCommand([
+        "health-exercise",
+        "template",
+        "create",
+        "--db",
+        dbPath,
+        "--slug",
+        "starter-strength",
+        "--name",
+        "Starter Strength",
+        "--day",
+        "0:push:Push:20",
+        "--bogus",
+        "1"
+      ])
+    ).rejects.toThrow(/Unknown option for health-exercise template create: --bogus/);
+    await expect(
+      handleKlCommand([
+        "health-exercise",
+        "template",
+        "create",
+        "--db",
+        dbPath,
+        "--db",
+        otherDbPath,
+        "--slug",
+        "starter-strength",
+        "--name",
+        "Starter Strength",
+        "--day",
+        "0:push:Push:20"
+      ])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand([
+        "health-exercise",
+        "template",
+        "create",
+        "--db",
+        dbPath,
+        "--slug",
+        "starter-strength",
+        "--name",
+        "Starter Strength"
+      ])
+    ).rejects.toThrow(/requires at least one --day/);
+    await expect(
+      handleKlCommand([
+        "health-exercise",
+        "completion",
+        "--db",
+        dbPath,
+        "--from",
+        "2026-06-15",
+        "--from",
+        "2026-06-16",
+        "--to",
+        "2026-06-22"
+      ])
+    ).rejects.toThrow(/requires exactly one --from/);
   });
 
   test("agent dry-run prints planned Multica actions without requiring API keys", async () => {

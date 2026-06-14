@@ -10,6 +10,8 @@ import {
   normalizeMetricKey
 } from "./schema.js";
 import {
+  findExerciseTemplateBySlug,
+  findExerciseSessionByPlanAndTemplateKey,
   findMetricImportByHash,
   getHealthMetricById,
   insertBreakReminder,
@@ -17,13 +19,15 @@ import {
   insertExercisePlan,
   insertExerciseSession,
   insertExerciseTemplate,
+  listExerciseSessionsForCompletion,
   insertHealthMetric,
   insertHealthTraceEvent,
   insertMetricAuditEvent,
   insertMetricImportRecord,
   insertSedentarySpan,
   insertSedentaryStreak,
-  listHealthMetrics
+  listHealthMetrics,
+  updateExerciseSessionCompletion
 } from "./store.js";
 
 describe("health extension schema helpers", () => {
@@ -246,7 +250,10 @@ describe("health extension store", () => {
         slug: "starter",
         name: "Starter",
         description: "simple week",
-        defaultDays: ["monday", "wednesday"],
+        defaultDays: [
+          { sessionKey: "monday", dayOffset: 0, title: "Monday", targetMinutes: 30 },
+          { sessionKey: "wednesday", dayOffset: 2, title: "Wednesday", targetReps: 25 }
+        ],
         active: true
       });
       const plan = insertExercisePlan(db, {
@@ -272,9 +279,18 @@ describe("health extension store", () => {
         note: "finished"
       });
 
-      expect(template.defaultDays).toEqual(["monday", "wednesday"]);
+      expect(template.defaultDays).toEqual([
+        { sessionKey: "monday", dayOffset: 0, title: "Monday", targetMinutes: 30 },
+        { sessionKey: "wednesday", dayOffset: 2, title: "Wednesday", targetReps: 25 }
+      ]);
       expect(planned.status).toBe("planned");
       expect(completed.completedAt).toBe("2026-06-16T09:30:00.000Z");
+      expect(
+        listExerciseSessionsForCompletion(db, {
+          from: "2026-06-15",
+          to: "2026-06-18"
+        }).plannedSessions.map((session) => session.id)
+      ).toEqual([planned.id]);
     } finally {
       db.close();
     }
@@ -288,10 +304,143 @@ describe("health extension store", () => {
         insertExerciseTemplate(db, {
           slug: "bad-template",
           name: "Bad Template",
-          defaultDays: [1] as unknown as readonly string[]
+          defaultDays: [1] as never
         })
-      ).toThrow("defaultDays must be a JSON string array");
+      ).toThrow("defaultDays must be an array of exercise template day objects");
       expect(tableCount(db, "exercise_templates")).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("rejects semantically invalid exercise template default days before persistence", () => {
+    const invalidDefaultDays = [
+      [{ sessionKey: "", dayOffset: 0, title: "Push", targetMinutes: 20 }],
+      [{ sessionKey: "push", dayOffset: -1, title: "Push", targetMinutes: 20 }],
+      [{ sessionKey: "push", dayOffset: 0.5, title: "Push", targetMinutes: 20 }],
+      [{ sessionKey: "push", dayOffset: 0, title: "", targetMinutes: 20 }],
+      [{ sessionKey: "push", dayOffset: 0, title: "Push" }],
+      [{ sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 0 }],
+      [{ sessionKey: "push", dayOffset: 0, title: "Push", targetReps: -1 }],
+      [
+        { sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 20 },
+        { sessionKey: "push", dayOffset: 2, title: "Push Again", targetMinutes: 20 }
+      ]
+    ];
+
+    for (const [index, defaultDays] of invalidDefaultDays.entries()) {
+      const db = migratedDb();
+
+      try {
+        expect(() =>
+          insertExerciseTemplate(db, {
+            slug: `bad-template-${index}`,
+            name: "Bad Template",
+            defaultDays
+          })
+        ).toThrow();
+        expect(tableCount(db, "exercise_templates")).toBe(0);
+      } finally {
+        db.close();
+      }
+    }
+  });
+
+  test("rejects semantically invalid exercise template default days when mapping stored rows", () => {
+    const db = migratedDb();
+
+    try {
+      db.prepare(
+        `INSERT INTO exercise_templates (slug, name, default_days)
+         VALUES (?, ?, ?)`
+      ).run(
+        "corrupt-template",
+        "Corrupt Template",
+        JSON.stringify([{ sessionKey: "", dayOffset: -1, title: "bad", targetMinutes: 0 }])
+      );
+
+      expect(() => findExerciseTemplateBySlug(db, "corrupt-template")).toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("preserves planned session fields when store completion omits optional values", () => {
+    const db = migratedDb();
+
+    try {
+      const template = insertExerciseTemplate(db, {
+        slug: "starter",
+        name: "Starter",
+        defaultDays: [{ sessionKey: "monday", dayOffset: 0, title: "Monday", targetMinutes: 30 }]
+      });
+      const plan = insertExercisePlan(db, {
+        templateId: template.id,
+        weekStart: "2026-06-15",
+        status: "active",
+        generatedFrom: "unit-test"
+      });
+      const planned = insertExerciseSession(db, {
+        planId: plan.id,
+        templateSessionKey: "starter:monday",
+        scheduledFor: "2026-06-15T09:00:00.000Z",
+        status: "planned",
+        durationMinutes: 30,
+        intensity: "moderate",
+        note: "template target"
+      });
+
+      const completed = updateExerciseSessionCompletion(db, planned.id, {
+        completedAt: "2026-06-15T10:00:00.000Z",
+        status: "completed"
+      });
+
+      expect(completed).toMatchObject({
+        id: planned.id,
+        planId: plan.id,
+        templateSessionKey: "starter:monday",
+        scheduledFor: "2026-06-15T09:00:00.000Z",
+        completedAt: "2026-06-15T10:00:00.000Z",
+        status: "completed",
+        durationMinutes: 30,
+        intensity: "moderate",
+        note: "template target"
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("finds planned exercise sessions by plan id and template session key", () => {
+    const db = migratedDb();
+
+    try {
+      const template = insertExerciseTemplate(db, {
+        slug: "starter",
+        name: "Starter",
+        defaultDays: [{ sessionKey: "monday", dayOffset: 0, title: "Monday", targetMinutes: 30 }]
+      });
+      const plan = insertExercisePlan(db, {
+        templateId: template.id,
+        weekStart: "2026-06-15",
+        status: "active",
+        generatedFrom: "unit-test"
+      });
+      const planned = insertExerciseSession(db, {
+        planId: plan.id,
+        templateSessionKey: "starter:monday",
+        scheduledFor: "2026-06-15T09:00:00.000Z",
+        status: "planned",
+        durationMinutes: 30
+      });
+
+      expect(findExerciseSessionByPlanAndTemplateKey(db, plan.id, "starter:monday")).toMatchObject({
+        id: planned.id,
+        planId: plan.id,
+        templateSessionKey: "starter:monday",
+        status: "planned"
+      });
+      expect(findExerciseSessionByPlanAndTemplateKey(db, plan.id, "starter:wednesday")).toBeUndefined();
     } finally {
       db.close();
     }

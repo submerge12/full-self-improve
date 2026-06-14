@@ -14,6 +14,7 @@ import {
   type ExercisePlanStatus,
   type ExerciseSessionInput,
   type ExerciseSessionStatus,
+  type ExerciseTemplateDay,
   type ExerciseTemplateInput,
   type HealthMetricInput,
   type HealthMetricQuery,
@@ -47,6 +48,21 @@ export interface HealthMetricWriteOptions {
 export interface MetricImportReservation {
   readonly importRecord: StoredMetricImport;
   readonly created: boolean;
+}
+
+export interface ExerciseTemplateUpsertResult {
+  readonly template: StoredExerciseTemplate;
+  readonly created: boolean;
+}
+
+export interface ExerciseSessionCompletionWindowQuery {
+  readonly from: string;
+  readonly to: string;
+}
+
+export interface ExerciseSessionCompletionWindow {
+  readonly plannedSessions: readonly StoredExerciseSession[];
+  readonly adHocSessions: readonly StoredExerciseSession[];
 }
 
 export function insertHealthMetric(
@@ -241,11 +257,54 @@ export function insertExerciseTemplate(db: Database.Database, input: ExerciseTem
       slug: assertSafeText(input.slug, "slug"),
       name: assertSafeText(input.name, "name"),
       description: optionalText(input.description, "description"),
-      defaultDays: stringifyJsonStringArray(input.defaultDays, "defaultDays"),
+      defaultDays: stringifyExerciseTemplateDays(input.defaultDays, "defaultDays"),
       active: input.active === undefined || input.active ? 1 : 0
     }) as ExerciseTemplateRow;
 
   return mapExerciseTemplateRow(row);
+}
+
+export function upsertExerciseTemplate(db: Database.Database, input: ExerciseTemplateInput): ExerciseTemplateUpsertResult {
+  const existing = findExerciseTemplateBySlug(db, input.slug);
+  if (existing === undefined) {
+    return { template: insertExerciseTemplate(db, input), created: true };
+  }
+
+  const row = db
+    .prepare(
+      `UPDATE exercise_templates
+       SET name = @name,
+           description = @description,
+           default_days = @defaultDays,
+           active = @active,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = @id
+       RETURNING id, slug, name, description, default_days, active, created_at, updated_at`
+    )
+    .get({
+      id: existing.id,
+      name: assertSafeText(input.name, "name"),
+      description: optionalText(input.description, "description"),
+      defaultDays: stringifyExerciseTemplateDays(input.defaultDays, "defaultDays"),
+      active: input.active === undefined || input.active ? 1 : 0
+    }) as ExerciseTemplateRow | undefined;
+
+  if (row === undefined) {
+    throw new Error("exercise template update did not return a row");
+  }
+  return { template: mapExerciseTemplateRow(row), created: false };
+}
+
+export function findExerciseTemplateBySlug(db: Database.Database, slug: string): StoredExerciseTemplate | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, slug, name, description, default_days, active, created_at, updated_at
+       FROM exercise_templates
+       WHERE slug = ?`
+    )
+    .get(assertSafeText(slug, "slug")) as ExerciseTemplateRow | undefined;
+
+  return row === undefined ? undefined : mapExerciseTemplateRow(row);
 }
 
 export function insertExercisePlan(db: Database.Database, input: ExercisePlanInput): StoredExercisePlan {
@@ -263,6 +322,21 @@ export function insertExercisePlan(db: Database.Database, input: ExercisePlanInp
     }) as ExercisePlanRow;
 
   return mapExercisePlanRow(row);
+}
+
+export function findActiveExercisePlanByWeekStart(
+  db: Database.Database,
+  weekStart: string
+): StoredExercisePlan | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, template_id, week_start, status, generated_from, created_at, updated_at
+       FROM exercise_plans
+       WHERE week_start = ? AND status = 'active'`
+    )
+    .get(assertIsoDate(weekStart, "weekStart")) as ExercisePlanRow | undefined;
+
+  return row === undefined ? undefined : mapExercisePlanRow(row);
 }
 
 export function insertExerciseSession(db: Database.Database, input: ExerciseSessionInput): StoredExerciseSession {
@@ -285,6 +359,108 @@ export function insertExerciseSession(db: Database.Database, input: ExerciseSess
     }) as ExerciseSessionRow;
 
   return mapExerciseSessionRow(row);
+}
+
+export function getExerciseSessionById(db: Database.Database, id: number): StoredExerciseSession | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, plan_id, template_session_key, scheduled_for, completed_at, status, duration_minutes, intensity, note, created_at, updated_at
+       FROM exercise_sessions
+       WHERE id = ?`
+    )
+    .get(assertPositiveInteger(id, "id")) as ExerciseSessionRow | undefined;
+
+  return row === undefined ? undefined : mapExerciseSessionRow(row);
+}
+
+export function findExerciseSessionByPlanAndTemplateKey(
+  db: Database.Database,
+  planId: number,
+  templateSessionKey: string
+): StoredExerciseSession | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, plan_id, template_session_key, scheduled_for, completed_at, status, duration_minutes, intensity, note, created_at, updated_at
+       FROM exercise_sessions
+       WHERE plan_id = @planId
+         AND template_session_key = @templateSessionKey`
+    )
+    .get({
+      planId: assertPositiveInteger(planId, "planId"),
+      templateSessionKey: assertSafeText(templateSessionKey, "templateSessionKey")
+    }) as ExerciseSessionRow | undefined;
+
+  return row === undefined ? undefined : mapExerciseSessionRow(row);
+}
+
+export function updateExerciseSessionCompletion(
+  db: Database.Database,
+  id: number,
+  input: Omit<ExerciseSessionInput, "planId" | "scheduledFor" | "status" | "templateSessionKey"> & {
+    readonly status: "completed";
+  }
+): StoredExerciseSession {
+  const row = db
+    .prepare(
+      `UPDATE exercise_sessions
+       SET completed_at = @completedAt,
+           status = 'completed',
+           duration_minutes = COALESCE(@durationMinutes, duration_minutes),
+           intensity = COALESCE(@intensity, intensity),
+           note = COALESCE(@note, note),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = @id
+       RETURNING id, plan_id, template_session_key, scheduled_for, completed_at, status, duration_minutes, intensity, note, created_at, updated_at`
+    )
+    .get({
+      id: assertPositiveInteger(id, "id"),
+      completedAt: input.completedAt === undefined ? null : assertIsoInstant(input.completedAt, "completedAt"),
+      durationMinutes: input.durationMinutes === undefined ? null : assertPositiveInteger(input.durationMinutes, "durationMinutes"),
+      intensity: input.intensity ?? null,
+      note: optionalText(input.note, "note")
+    }) as ExerciseSessionRow | undefined;
+
+  if (row === undefined) {
+    throw new Error("exercise session not found");
+  }
+  return mapExerciseSessionRow(row);
+}
+
+export function listExerciseSessionsForCompletion(
+  db: Database.Database,
+  query: ExerciseSessionCompletionWindowQuery
+): ExerciseSessionCompletionWindow {
+  const start = startInstantForIsoDate(query.from, "from");
+  const end = startInstantForIsoDate(query.to, "to");
+  if (end <= start) {
+    throw new Error("to must be after from");
+  }
+
+  const plannedRows = db
+    .prepare(
+      `SELECT id, plan_id, template_session_key, scheduled_for, completed_at, status, duration_minutes, intensity, note, created_at, updated_at
+       FROM exercise_sessions
+       WHERE plan_id IS NOT NULL
+         AND scheduled_for >= @start
+         AND scheduled_for < @end
+       ORDER BY scheduled_for ASC, id ASC`
+    )
+    .all({ start, end }) as ExerciseSessionRow[];
+  const adHocRows = db
+    .prepare(
+      `SELECT id, plan_id, template_session_key, scheduled_for, completed_at, status, duration_minutes, intensity, note, created_at, updated_at
+       FROM exercise_sessions
+       WHERE status = 'ad_hoc'
+         AND completed_at >= @start
+         AND completed_at < @end
+       ORDER BY completed_at ASC, id ASC`
+    )
+    .all({ start, end }) as ExerciseSessionRow[];
+
+  return {
+    plannedSessions: plannedRows.map(mapExerciseSessionRow),
+    adHocSessions: adHocRows.map(mapExerciseSessionRow)
+  };
 }
 
 export function insertSedentarySpan(db: Database.Database, input: SedentarySpanInput): StoredSedentarySpan {
@@ -575,7 +751,7 @@ function mapExerciseTemplateRow(row: ExerciseTemplateRow): StoredExerciseTemplat
     slug: row.slug,
     name: row.name,
     description: row.description ?? undefined,
-    defaultDays: parseJsonArray(row.default_days, "defaultDays"),
+    defaultDays: parseExerciseTemplateDays(row.default_days, "defaultDays"),
     active: row.active === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -727,6 +903,10 @@ function assertConfidence(value: number, field: string): number {
   return value;
 }
 
+function startInstantForIsoDate(value: string, field: string): string {
+  return `${assertIsoDate(value, field)}T00:00:00.000Z`;
+}
+
 function stringifyJson(value: unknown, field: string): string {
   assertStrictJsonValue(value, field, new WeakSet<object>());
   const json = JSON.stringify(value);
@@ -736,12 +916,8 @@ function stringifyJson(value: unknown, field: string): string {
   return json;
 }
 
-function stringifyJsonStringArray(value: readonly string[], field: string): string {
-  const candidate: unknown = value;
-  if (!Array.isArray(candidate) || !candidate.every((item) => typeof item === "string")) {
-    throw new Error(`${field} must be a JSON string array`);
-  }
-  return stringifyJson(candidate, field);
+function stringifyExerciseTemplateDays(value: readonly ExerciseTemplateDay[], field: string): string {
+  return stringifyJson(normalizeExerciseTemplateDays(value, field), field);
 }
 
 function stringifyJsonPositiveIntegerArray(value: readonly number[], field: string): string {
@@ -811,12 +987,12 @@ function assertStrictJsonValue(value: unknown, field: string, ancestors: WeakSet
   ancestors.delete(objectValue);
 }
 
-function parseJsonArray(value: string, field: string): readonly string[] {
+function parseExerciseTemplateDays(value: string, field: string): readonly ExerciseTemplateDay[] {
   const parsed = JSON.parse(value) as unknown;
-  if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) {
-    throw new Error(`${field} must be a JSON string array`);
+  if (!Array.isArray(parsed) || !parsed.every(isExerciseTemplateDayCandidate)) {
+    throw new Error(`${field} must be an array of exercise template day objects`);
   }
-  return parsed;
+  return normalizeExerciseTemplateDays(parsed, field);
 }
 
 function parseJsonNumberArray(value: string, field: string): readonly number[] {
@@ -829,4 +1005,59 @@ function parseJsonNumberArray(value: string, field: string): readonly number[] {
 
 function withoutUndefined<T extends Record<string, unknown>>(value: T): T {
   return Object.fromEntries(Object.entries(value).filter(([, entryValue]) => entryValue !== undefined)) as T;
+}
+
+function isExerciseTemplateDayCandidate(value: unknown): value is ExerciseTemplateDay {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const candidate = value as Partial<Record<keyof ExerciseTemplateDay, unknown>>;
+  return (
+    typeof candidate.sessionKey === "string" &&
+    typeof candidate.dayOffset === "number" &&
+    typeof candidate.title === "string" &&
+    (candidate.targetMinutes === undefined || typeof candidate.targetMinutes === "number") &&
+    (candidate.targetReps === undefined || typeof candidate.targetReps === "number")
+  );
+}
+
+function normalizeExerciseTemplateDays(value: readonly ExerciseTemplateDay[], field: string): readonly ExerciseTemplateDay[] {
+  const candidate: unknown = value;
+  if (!Array.isArray(candidate) || !candidate.every(isExerciseTemplateDayCandidate)) {
+    throw new Error(`${field} must be an array of exercise template day objects`);
+  }
+  if (candidate.length === 0) {
+    throw new Error(`${field} must include at least one day`);
+  }
+
+  const seenSessionKeys = new Set<string>();
+  return candidate.map((day) => {
+    const sessionKey = assertSafeText(day.sessionKey, `${field} sessionKey`);
+    if (seenSessionKeys.has(sessionKey)) {
+      throw new Error(`${field} sessionKey values must be unique`);
+    }
+    seenSessionKeys.add(sessionKey);
+
+    const targetMinutes = optionalPositiveInteger(day.targetMinutes, `${field} targetMinutes`);
+    const targetReps = optionalPositiveInteger(day.targetReps, `${field} targetReps`);
+    if (targetMinutes === undefined && targetReps === undefined) {
+      throw new Error(`${field} targetMinutes or targetReps is required`);
+    }
+
+    return {
+      sessionKey,
+      dayOffset: assertNonNegativeInteger(day.dayOffset, `${field} dayOffset`),
+      title: assertSafeText(day.title, `${field} title`),
+      ...(targetMinutes === undefined ? {} : { targetMinutes }),
+      ...(targetReps === undefined ? {} : { targetReps })
+    };
+  });
+}
+
+function optionalPositiveInteger(value: number | undefined, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  return assertPositiveInteger(value, field);
 }

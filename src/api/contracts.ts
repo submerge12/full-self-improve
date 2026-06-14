@@ -36,7 +36,11 @@ export const API_ROUTE_IDS = [
   "health.metrics.create",
   "health.metrics.list",
   "health.metrics.update",
-  "health.metrics.import"
+  "health.metrics.import",
+  "health.exercise.templates.create",
+  "health.exercise.plans.create",
+  "health.exercise.sessions.complete",
+  "health.exercise.completion"
 ] as const;
 
 export type ApiRouteId = (typeof API_ROUTE_IDS)[number];
@@ -154,6 +158,34 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/health/metrics/import",
     auth: "bearer",
     description: "Import health metric observations from CSV text."
+  },
+  {
+    id: "health.exercise.templates.create",
+    method: "POST",
+    path: "/api/health/exercise/templates",
+    auth: "bearer",
+    description: "Create or update a reusable exercise template with default weekly sessions."
+  },
+  {
+    id: "health.exercise.plans.create",
+    method: "POST",
+    path: "/api/health/exercise/plans",
+    auth: "bearer",
+    description: "Create a weekly exercise plan from an existing template."
+  },
+  {
+    id: "health.exercise.sessions.complete",
+    method: "POST",
+    path: "/api/health/exercise/sessions/complete",
+    auth: "bearer",
+    description: "Complete a planned exercise session or record an ad hoc session."
+  },
+  {
+    id: "health.exercise.completion",
+    method: "GET",
+    path: "/api/health/exercise/completion?from=...&to=...",
+    auth: "bearer",
+    description: "Summarize planned and ad hoc exercise completion for a required date window."
   }
 ] as const satisfies readonly ApiRouteManifestEntry[];
 
@@ -281,6 +313,16 @@ function routeMatchesPath(route: ApiRouteManifestEntry, path: string): boolean {
     const url = parseApiPath(path);
 
     return url?.pathname === "/api/health/metrics";
+  }
+
+  if (route.id === "health.exercise.completion") {
+    if (!isLocalApiPathString(path)) {
+      return false;
+    }
+
+    const url = parseApiPath(path);
+
+    return url?.pathname === "/api/health/exercise/completion";
   }
 
   return false;

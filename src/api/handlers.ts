@@ -29,12 +29,24 @@ import { gradePersistentTeachback } from "../engine/persistent-teachback.js";
 import type { SourceAdapter } from "../engine/source-adapter.js";
 import type { TraceEvent } from "../engine/trace.js";
 import {
+  completeExerciseSession,
+  createExercisePlanFromTemplate,
+  createExerciseTemplate,
+  queryExerciseCompletion,
+  type ExerciseTemplateDayInput
+} from "../health-extensions/exercise.js";
+import {
   createHealthMetric,
   importHealthMetricsCsv,
   queryHealthMetrics,
   updateHealthMetric
 } from "../health-extensions/metrics.js";
-import { assertIsoDate, assertIsoInstant, type HealthMetricQuery } from "../health-extensions/schema.js";
+import {
+  assertIsoDate,
+  assertIsoInstant,
+  type ExerciseIntensity,
+  type HealthMetricQuery
+} from "../health-extensions/schema.js";
 
 export interface ApiRequest {
   readonly method: ApiMethod;
@@ -144,6 +156,33 @@ interface HealthMetricImportBody {
   csvText: string;
 }
 
+interface ExerciseTemplateCreateBody {
+  slug: string;
+  name: string;
+  description?: string;
+  defaultDays: ExerciseTemplateDayInput[];
+}
+
+interface ExercisePlanCreateBody {
+  templateSlug: string;
+  weekStart: string;
+}
+
+interface ExerciseSessionCompleteBody {
+  sessionId?: number;
+  planId?: number;
+  templateSessionKey?: string;
+  completedAt: string;
+  durationMinutes?: number;
+  intensity?: ExerciseIntensity;
+  note?: string;
+}
+
+interface ExerciseCompletionQuery {
+  from: string;
+  to: string;
+}
+
 class ApiBadRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -207,6 +246,14 @@ export async function handleApiRequest(
         return handleHealthMetricUpdate(request, context);
       case "health.metrics.import":
         return handleHealthMetricImport(request, context);
+      case "health.exercise.templates.create":
+        return handleExerciseTemplateCreate(request, context);
+      case "health.exercise.plans.create":
+        return handleExercisePlanCreate(request, context);
+      case "health.exercise.sessions.complete":
+        return handleExerciseSessionComplete(request, context);
+      case "health.exercise.completion":
+        return handleExerciseCompletion(request, context);
     }
   } catch (error) {
     if (error instanceof ApiBadRequestError || isRouteInputError(route.id, error)) {
@@ -373,6 +420,39 @@ function handleHealthMetricImport(request: ApiRequest, context: ApiHandlerContex
   return successResponse("health.metrics.import", { result });
 }
 
+function handleExerciseTemplateCreate(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseExerciseTemplateCreateBody(request.body);
+  const result = createExerciseTemplate(context.db, body);
+
+  return successResponse("health.exercise.templates.create", { result });
+}
+
+function handleExercisePlanCreate(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseExercisePlanCreateBody(request.body);
+  const result = createExercisePlanFromTemplate(context.db, body);
+
+  return successResponse("health.exercise.plans.create", { result });
+}
+
+function handleExerciseSessionComplete(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseExerciseSessionCompleteBody(request.body);
+  const result = completeExerciseSession(context.db, body);
+
+  return successResponse("health.exercise.sessions.complete", { result });
+}
+
+function handleExerciseCompletion(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const summary = queryExerciseCompletion(context.db, parseExerciseCompletionQuery(request.path));
+
+  return successResponse("health.exercise.completion", { summary });
+}
+
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
   db: Database.Database,
   mutation: () => T
@@ -524,6 +604,70 @@ function parseHealthMetricImportBody(body: unknown): HealthMetricImportBody {
   return {
     sourceFilename: requiredString(record, "sourceFilename"),
     csvText: requiredString(record, "csvText")
+  };
+}
+
+function parseExerciseTemplateCreateBody(body: unknown): ExerciseTemplateCreateBody {
+  const record = parseBodyRecord(body);
+  const description = optionalString(record.description, "description");
+
+  return {
+    slug: requiredString(record, "slug"),
+    name: requiredString(record, "name"),
+    ...(description === undefined ? {} : { description }),
+    defaultDays: requiredExerciseTemplateDays(record.defaultDays)
+  };
+}
+
+function parseExercisePlanCreateBody(body: unknown): ExercisePlanCreateBody {
+  const record = parseBodyRecord(body);
+
+  return {
+    templateSlug: requiredString(record, "templateSlug"),
+    weekStart: requiredString(record, "weekStart")
+  };
+}
+
+function parseExerciseSessionCompleteBody(body: unknown): ExerciseSessionCompleteBody {
+  const record = parseBodyRecord(body);
+  const sessionId = optionalPositiveSafeInteger(record.sessionId, "sessionId");
+  const planId = optionalPositiveSafeInteger(record.planId, "planId");
+  const templateSessionKey = optionalNonEmptyString(record.templateSessionKey, "templateSessionKey");
+  assertExerciseCompletionTargetMode(sessionId, planId, templateSessionKey);
+  const durationMinutes = optionalPositiveSafeInteger(record.durationMinutes, "durationMinutes");
+  const intensity = optionalExerciseIntensity(record.intensity);
+  const note = optionalString(record.note, "note");
+
+  return {
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(planId === undefined ? {} : { planId }),
+    ...(templateSessionKey === undefined ? {} : { templateSessionKey }),
+    completedAt: requiredString(record, "completedAt"),
+    ...(durationMinutes === undefined ? {} : { durationMinutes }),
+    ...(intensity === undefined ? {} : { intensity }),
+    ...(note === undefined ? {} : { note })
+  };
+}
+
+function assertExerciseCompletionTargetMode(
+  sessionId: number | undefined,
+  planId: number | undefined,
+  templateSessionKey: string | undefined
+): void {
+  const hasSessionId = sessionId !== undefined;
+  const hasPlanTarget = planId !== undefined || templateSessionKey !== undefined;
+  const hasCompletePlanTarget = planId !== undefined && templateSessionKey !== undefined;
+  if ((hasSessionId && hasPlanTarget) || (!hasSessionId && hasPlanTarget && !hasCompletePlanTarget)) {
+    throw new ApiBadRequestError("completion target must be sessionId, planId with templateSessionKey, or omitted");
+  }
+}
+
+function parseExerciseCompletionQuery(path: string): ExerciseCompletionQuery {
+  const url = parseRequestPath(path);
+
+  return {
+    from: requiredIsoDateQuery(url.searchParams.get("from"), "from"),
+    to: requiredIsoDateQuery(url.searchParams.get("to"), "to")
   };
 }
 
@@ -708,6 +852,79 @@ function optionalFiniteNumber(value: unknown, field: string): number | undefined
   return value;
 }
 
+function requiredExerciseTemplateDays(value: unknown): ExerciseTemplateDayInput[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ApiBadRequestError("Request body field defaultDays must be a non-empty array.");
+  }
+
+  return value.map(requiredExerciseTemplateDay);
+}
+
+function requiredExerciseTemplateDay(value: unknown): ExerciseTemplateDayInput {
+  if (!isPlainObject(value)) {
+    throw new ApiBadRequestError("Request body field defaultDays must contain objects.");
+  }
+
+  const targetMinutes = optionalPositiveSafeInteger(value.targetMinutes, "defaultDays.targetMinutes");
+  const targetReps = optionalPositiveSafeInteger(value.targetReps, "defaultDays.targetReps");
+  if (targetMinutes === undefined && targetReps === undefined) {
+    throw new ApiBadRequestError("Request body field defaultDays requires targetMinutes or targetReps.");
+  }
+
+  return {
+    sessionKey: requiredString(value, "sessionKey"),
+    dayOffset: requiredNonNegativeSafeInteger(value, "dayOffset"),
+    title: requiredString(value, "title"),
+    ...(targetMinutes === undefined ? {} : { targetMinutes }),
+    ...(targetReps === undefined ? {} : { targetReps })
+  };
+}
+
+function requiredNonNegativeSafeInteger(record: Record<string, unknown>, field: string): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a non-negative safe integer.`);
+  }
+
+  return value;
+}
+
+function optionalPositiveSafeInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a positive safe integer.`);
+  }
+
+  return value;
+}
+
+function optionalExerciseIntensity(value: unknown): ExerciseIntensity | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === "low" || value === "moderate" || value === "high") {
+    return value;
+  }
+
+  throw new ApiBadRequestError("Request body field intensity must be low, moderate, or high.");
+}
+
+function requiredIsoDateQuery(value: string | null, field: "from" | "to"): string {
+  if (value === null || value.trim().length === 0) {
+    throw new ApiBadRequestError(`Exercise completion query parameter ${field} must be an ISO date.`);
+  }
+
+  try {
+    return assertIsoDate(value, field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
 function requiredReviewRating(value: unknown): PersistentReviewRating {
   if (value === "again" || value === "hard" || value === "good" || value === "easy") {
     return value;
@@ -885,6 +1102,11 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
     case "health.metrics.update":
     case "health.metrics.import":
       return isHealthMetricInputError(error.message);
+    case "health.exercise.templates.create":
+    case "health.exercise.plans.create":
+    case "health.exercise.sessions.complete":
+    case "health.exercise.completion":
+      return isExerciseInputError(error.message);
     default:
       return false;
   }
@@ -960,6 +1182,27 @@ function isHealthMetricInputError(message: string): boolean {
     /^CSV is missing .+ column$/.test(message) ||
     /^(metricKey|metricLabel|unit|observedAt|note|now|reason|sourceFilename|importedAt|contentHash) /.test(message) ||
     /^(value|id|metricId|rowCount|acceptedCount|rejectedCount) /.test(message)
+  );
+}
+
+function isExerciseInputError(message: string): boolean {
+  return (
+    message === "exercise template not found" ||
+    message === "active exercise plan already exists for weekStart" ||
+    message === "exercise session not found" ||
+    message === "planned exercise session not found" ||
+    message === "sessionId must reference a planned exercise session" ||
+    message === "completedAt cannot be before scheduledFor" ||
+    message === "completion target must be sessionId, planId with templateSessionKey, or omitted" ||
+    message === "weekStart must be a Monday" ||
+    message === "defaultDays must include at least one day" ||
+    message === "defaultDays sessionKey values must be unique" ||
+    message === "defaultDays targetMinutes or targetReps is required" ||
+    message === "to must be after from" ||
+    /^(slug|name|description|templateSlug|weekStart|completedAt|durationMinutes|sessionId|planId|templateSessionKey|targetMinutes|targetReps|dayOffset|title|note|from|to) /.test(
+      message
+    ) ||
+    /^defaultDays /.test(message)
   );
 }
 

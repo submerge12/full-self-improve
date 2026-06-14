@@ -28,12 +28,26 @@ const expectedRoutes = [
   { id: "health.metrics.create", method: "POST", path: "/api/health/metrics", auth: "bearer" },
   { id: "health.metrics.list", method: "GET", path: "/api/health/metrics?metric=...", auth: "bearer" },
   { id: "health.metrics.update", method: "PATCH", path: "/api/health/metrics", auth: "bearer" },
-  { id: "health.metrics.import", method: "POST", path: "/api/health/metrics/import", auth: "bearer" }
+  { id: "health.metrics.import", method: "POST", path: "/api/health/metrics/import", auth: "bearer" },
+  { id: "health.exercise.templates.create", method: "POST", path: "/api/health/exercise/templates", auth: "bearer" },
+  { id: "health.exercise.plans.create", method: "POST", path: "/api/health/exercise/plans", auth: "bearer" },
+  {
+    id: "health.exercise.sessions.complete",
+    method: "POST",
+    path: "/api/health/exercise/sessions/complete",
+    auth: "bearer"
+  },
+  {
+    id: "health.exercise.completion",
+    method: "GET",
+    path: "/api/health/exercise/completion?from=...&to=...",
+    auth: "bearer"
+  }
 ] as const;
 
 describe("API route manifest", () => {
   test("contains exactly the documented API endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(15);
+    expect(API_ROUTE_MANIFEST).toHaveLength(19);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -51,7 +65,7 @@ describe("API route manifest", () => {
   test("requires bearer auth for every mutation route", () => {
     const mutationRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST" || route.method === "PATCH");
 
-    expect(mutationRoutes).toHaveLength(10);
+    expect(mutationRoutes).toHaveLength(13);
     expect(mutationRoutes.every((route) => route.auth === "bearer")).toBe(true);
   });
 
@@ -92,6 +106,23 @@ describe("API route manifest", () => {
     expect(findApiRoute("PATCH", "/api/health/metrics/1")).toBeUndefined();
     expect(findApiRoute("POST", "/api/health/metrics/import")?.id).toBe("health.metrics.import");
     expect(findApiRoute("GET", "/api/health/metrics/import")).toBeUndefined();
+
+    expect(findApiRoute("POST", "/api/health/exercise/templates")?.id).toBe("health.exercise.templates.create");
+    expect(findApiRoute("POST", "/api/health/exercise/templates?slug=starter")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/exercise/plans")?.id).toBe("health.exercise.plans.create");
+    expect(findApiRoute("POST", "/api/health/exercise/sessions/complete")?.id).toBe(
+      "health.exercise.sessions.complete"
+    );
+    expect(findApiRoute("GET", "/api/health/exercise/completion?from=2026-06-15&to=2026-06-22")?.id).toBe(
+      "health.exercise.completion"
+    );
+    expect(findApiRoute("GET", "/api/health/exercise/completion")?.id).toBe("health.exercise.completion");
+    expect(findApiRoute("POST", "/api/health/exercise/completion?from=2026-06-15&to=2026-06-22")).toBeUndefined();
+    expect(findApiRoute("GET", "api/health/exercise/completion?from=2026-06-15&to=2026-06-22")).toBeUndefined();
+    expect(
+      findApiRoute("GET", "https://evil.test/api/health/exercise/completion?from=2026-06-15&to=2026-06-22")
+    ).toBeUndefined();
+    expect(findApiRoute("GET", "//evil.test/api/health/exercise/completion?from=2026-06-15&to=2026-06-22")).toBeUndefined();
   });
 });
 

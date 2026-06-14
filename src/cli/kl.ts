@@ -102,7 +102,23 @@ import {
   queryHealthMetrics,
   updateHealthMetric
 } from "../health-extensions/metrics.js";
-import { normalizeHealthMetricInput, normalizeMetricKey } from "../health-extensions/schema.js";
+import {
+  assertSafeText,
+  normalizeHealthMetricInput,
+  normalizeMetricKey,
+  type ExerciseIntensity
+} from "../health-extensions/schema.js";
+import {
+  completeExerciseSession,
+  createExercisePlanFromTemplate,
+  createExerciseTemplate,
+  queryExerciseCompletion,
+  type ExerciseCompletionSummary,
+  type ExercisePlanResult,
+  type ExerciseSessionCompletionResult,
+  type ExerciseTemplateDayInput,
+  type ExerciseTemplateResult
+} from "../health-extensions/exercise.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -220,6 +236,17 @@ export interface KlHealthMetricCommandResult {
   readonly mode: "mock-persistent";
   readonly action: "add" | "list" | "update" | "import-csv";
   readonly result: unknown;
+}
+
+export interface KlHealthExerciseCommandResult {
+  readonly command: "health-exercise";
+  readonly mode: "mock-persistent";
+  readonly action: "template.create" | "plan.create" | "complete" | "completion";
+  readonly result:
+    | ExerciseTemplateResult
+    | ExercisePlanResult
+    | ExerciseSessionCompletionResult
+    | ExerciseCompletionSummary;
 }
 
 export interface KlAgentDryRunCommandResult {
@@ -407,6 +434,7 @@ export type KlCommandResult =
   | KlReviewCommandResult
   | KlTraceCommandResult
   | KlHealthMetricCommandResult
+  | KlHealthExerciseCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
@@ -450,6 +478,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
 
   if (command === "health-metric") {
     return runHealthMetricCommand(args);
+  }
+
+  if (command === "health-exercise") {
+    return runHealthExerciseCommand(args);
   }
 
   if (command === "application") {
@@ -497,7 +529,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -904,6 +936,159 @@ function runHealthMetricImportCsvCommand(args: readonly string[]): KlHealthMetri
       command: "health-metric",
       mode: "mock-persistent",
       action: "import-csv",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthExerciseCommand(args: readonly string[]): KlHealthExerciseCommandResult {
+  const [action, subAction] = args;
+
+  if (action === "template" && subAction === "create") {
+    return runHealthExerciseTemplateCreateCommand(args.slice(2));
+  }
+  if (action === "plan" && subAction === "create") {
+    return runHealthExercisePlanCreateCommand(args.slice(2));
+  }
+  if (action === "complete") {
+    return runHealthExerciseCompleteCommand(args.slice(1));
+  }
+  if (action === "completion") {
+    return runHealthExerciseCompletionCommand(args.slice(1));
+  }
+
+  throw new UsageError(
+    `Command health-exercise requires one action: template create, plan create, complete, or completion. Received "${args.join(" ")}".`
+  );
+}
+
+function runHealthExerciseTemplateCreateCommand(args: readonly string[]): KlHealthExerciseCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--slug", "--name", "--day"]),
+    "health-exercise template create"
+  );
+  const dbPath = requireOne(options, "--db", "health-exercise template create");
+  const slug = assertSafeText(requireOne(options, "--slug", "health-exercise template create"), "slug");
+  const name = assertSafeText(requireOne(options, "--name", "health-exercise template create"), "name");
+  const defaultDays = requireMany(options, "--day", "health-exercise template create").map(parseExerciseDayOption);
+  const db = new Database(dbPath);
+
+  try {
+    applyMigrations(db);
+    const result = createExerciseTemplate(db, { slug, name, defaultDays });
+    return {
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "template.create",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthExercisePlanCreateCommand(args: readonly string[]): KlHealthExerciseCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--template", "--week-start"]),
+    "health-exercise plan create"
+  );
+  const dbPath = requireOne(options, "--db", "health-exercise plan create");
+  const templateSlug = assertSafeText(
+    requireOne(options, "--template", "health-exercise plan create"),
+    "templateSlug"
+  );
+  const weekStart = parseCliMondayIsoDate(
+    requireOne(options, "--week-start", "health-exercise plan create"),
+    "--week-start"
+  );
+  const db = openExistingHealthExerciseDatabase(dbPath);
+
+  try {
+    const result = createExercisePlanFromTemplate(db, { templateSlug, weekStart });
+    return {
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "plan.create",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthExerciseCompleteCommand(args: readonly string[]): KlHealthExerciseCommandResult {
+  const options = parseOptions(
+    args,
+    new Set([
+      "--db",
+      "--session-id",
+      "--plan-id",
+      "--template-session-key",
+      "--completed-at",
+      "--duration-minutes",
+      "--intensity"
+    ]),
+    "health-exercise complete"
+  );
+  const dbPath = requireOne(options, "--db", "health-exercise complete");
+  const sessionIdValue = optionalOne(options, "--session-id", "health-exercise complete");
+  const planIdValue = optionalOne(options, "--plan-id", "health-exercise complete");
+  const templateSessionKeyValue = optionalOne(options, "--template-session-key", "health-exercise complete");
+  const completedAt = parseCliIsoInstant(
+    requireOne(options, "--completed-at", "health-exercise complete"),
+    "--completed-at"
+  );
+  const durationValue = optionalOne(options, "--duration-minutes", "health-exercise complete");
+  const intensityValue = optionalOne(options, "--intensity", "health-exercise complete");
+  const sessionId =
+    sessionIdValue === undefined ? undefined : parsePositiveSafeInteger(sessionIdValue, "--session-id");
+  const planId = planIdValue === undefined ? undefined : parsePositiveSafeInteger(planIdValue, "--plan-id");
+  const templateSessionKey =
+    templateSessionKeyValue === undefined ? undefined : assertSafeText(templateSessionKeyValue, "templateSessionKey");
+  const durationMinutes =
+    durationValue === undefined ? undefined : parsePositiveSafeInteger(durationValue, "--duration-minutes");
+  const intensity = intensityValue === undefined ? undefined : parseExerciseIntensity(intensityValue);
+  assertHealthExerciseCompletionTargetMode(sessionId, planId, templateSessionKey);
+
+  const db = openExistingHealthExerciseDatabase(dbPath);
+  try {
+    const result = completeExerciseSession(db, {
+      ...(sessionId === undefined ? {} : { sessionId }),
+      ...(planId === undefined ? {} : { planId }),
+      ...(templateSessionKey === undefined ? {} : { templateSessionKey }),
+      completedAt,
+      ...(durationMinutes === undefined ? {} : { durationMinutes }),
+      ...(intensity === undefined ? {} : { intensity })
+    });
+    return {
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "complete",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthExerciseCompletionCommand(args: readonly string[]): KlHealthExerciseCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--from", "--to"]), "health-exercise completion");
+  const dbPath = requireOne(options, "--db", "health-exercise completion");
+  const from = parseCliIsoDate(requireOne(options, "--from", "health-exercise completion"), "--from");
+  const to = parseCliIsoDate(requireOne(options, "--to", "health-exercise completion"), "--to");
+  assertCliDateRange(from, to);
+  const db = openExistingHealthExerciseDatabase(dbPath, { readonly: true });
+
+  try {
+    const result = queryExerciseCompletion(db, { from, to });
+    return {
+      command: "health-exercise",
+      mode: "mock-persistent",
+      action: "completion",
       result
     };
   } finally {
@@ -2053,6 +2238,126 @@ function persistCommandTraceEvents(db: Database.Database, result: { traceEvents:
   }
 
   persistTraceEvents(db, result.traceEvents);
+}
+
+function parseExerciseDayOption(value: string): ExerciseTemplateDayInput {
+  const parts = value.split(":");
+  if (parts.length !== 4) {
+    throw invalidExerciseDay(value);
+  }
+
+  const [dayOffsetValue = "", sessionKeyValue = "", titleValue = "", targetValue = ""] = parts;
+  return {
+    dayOffset: parseExerciseDayOffset(dayOffsetValue, value),
+    sessionKey: parseExerciseDayText(sessionKeyValue, value),
+    title: parseExerciseDayText(titleValue, value),
+    targetMinutes: parseExerciseDayTarget(targetValue, value)
+  };
+}
+
+function parseExerciseDayOffset(value: string, fullValue: string): number {
+  const text = value.trim();
+  if (!/^(0|[1-9]\d*)$/.test(text)) {
+    throw invalidExerciseDay(fullValue);
+  }
+
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed)) {
+    throw invalidExerciseDay(fullValue);
+  }
+
+  return parsed;
+}
+
+function parseExerciseDayTarget(value: string, fullValue: string): number {
+  const text = value.trim();
+  if (!/^(0|[1-9]\d*)$/.test(text)) {
+    throw invalidExerciseDay(fullValue);
+  }
+
+  const parsed = Number(text);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw invalidExerciseDay(fullValue);
+  }
+
+  return parsed;
+}
+
+function parseExerciseDayText(value: string, fullValue: string): string {
+  const text = value.trim();
+  if (text.length === 0 || hasControlCharacter(text)) {
+    throw invalidExerciseDay(fullValue);
+  }
+
+  return text;
+}
+
+function hasControlCharacter(value: string): boolean {
+  return [...value].some((char) => {
+    const codePoint = char.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || codePoint === 0x7f;
+  });
+}
+
+function invalidExerciseDay(value: string): UsageError {
+  return new UsageError(
+    `Invalid --day value "${value}". Expected dayOffset:sessionKey:title:targetMinutes with non-negative dayOffset and positive targetMinutes.`
+  );
+}
+
+function parseCliIsoDate(value: string, optionName: string): string {
+  assertCliIsoDate(value, optionName);
+  return value;
+}
+
+function parseCliMondayIsoDate(value: string, optionName: string): string {
+  const date = parseCliIsoDate(value, optionName);
+  if (new Date(`${date}T00:00:00.000Z`).getUTCDay() !== 1) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a Monday ISO date.`);
+  }
+
+  return date;
+}
+
+function assertCliDateRange(from: string, to: string): void {
+  if (`${to}T00:00:00.000Z` <= `${from}T00:00:00.000Z`) {
+    throw new UsageError(`Invalid --to value "${to}". Expected an ISO date after --from.`);
+  }
+}
+
+function parseExerciseIntensity(value: string): ExerciseIntensity {
+  if (value === "low" || value === "moderate" || value === "high") {
+    return value;
+  }
+
+  throw new UsageError(`Invalid --intensity value "${value}". Expected low, moderate, or high.`);
+}
+
+function assertHealthExerciseCompletionTargetMode(
+  sessionId: number | undefined,
+  planId: number | undefined,
+  templateSessionKey: string | undefined
+): void {
+  const hasSessionId = sessionId !== undefined;
+  const hasPlanTarget = planId !== undefined || templateSessionKey !== undefined;
+  const hasCompletePlanTarget = planId !== undefined && templateSessionKey !== undefined;
+  if ((hasSessionId && hasPlanTarget) || (!hasSessionId && hasPlanTarget && !hasCompletePlanTarget)) {
+    throw new UsageError("completion target must be sessionId, planId with templateSessionKey, or omitted");
+  }
+}
+
+function openExistingHealthExerciseDatabase(
+  dbPath: string,
+  options: { readonly?: boolean } = {}
+): Database.Database {
+  if (!existsSync(dbPath)) {
+    throw new UsageError(`Health exercise database does not exist: ${dbPath}.`);
+  }
+
+  return new Database(
+    dbPath,
+    options.readonly === true ? { readonly: true, fileMustExist: true } : { fileMustExist: true }
+  );
 }
 
 function parseMetricNumber(value: string, optionName: string): number {

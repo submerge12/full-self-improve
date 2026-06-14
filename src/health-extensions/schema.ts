@@ -63,11 +63,19 @@ export interface StoredMetricImport extends MetricImportInput {
   readonly id: number;
 }
 
+export interface ExerciseTemplateDay {
+  readonly sessionKey: string;
+  readonly dayOffset: number;
+  readonly title: string;
+  readonly targetMinutes?: number;
+  readonly targetReps?: number;
+}
+
 export interface ExerciseTemplateInput {
   readonly slug: string;
   readonly name: string;
   readonly description?: string;
-  readonly defaultDays: readonly string[];
+  readonly defaultDays: readonly ExerciseTemplateDay[];
   readonly active?: boolean;
 }
 
@@ -76,7 +84,7 @@ export interface StoredExerciseTemplate {
   readonly slug: string;
   readonly name: string;
   readonly description?: string;
-  readonly defaultDays: readonly string[];
+  readonly defaultDays: readonly ExerciseTemplateDay[];
   readonly active: boolean;
   readonly createdAt: string;
   readonly updatedAt: string;

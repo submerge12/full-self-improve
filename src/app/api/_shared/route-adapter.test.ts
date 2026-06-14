@@ -172,11 +172,22 @@ describe("Next app route adapter", () => {
 
   test("actual health route modules export the expected HTTP method functions", async () => {
     const { metrics, metricsImport } = await importHealthRouteModules();
+    const { templates, plans, sessionsComplete, completion } = await importHealthExerciseRouteModules();
 
+    expect(exportKeys(metrics)).toEqual(["GET", "PATCH", "POST", "runtime"]);
     expect(metrics.POST).toEqual(expect.any(Function));
     expect(metrics.GET).toEqual(expect.any(Function));
     expect(metrics.PATCH).toEqual(expect.any(Function));
+    expect(exportKeys(metricsImport)).toEqual(["POST", "runtime"]);
     expect(metricsImport.POST).toEqual(expect.any(Function));
+    expect(exportKeys(templates)).toEqual(["POST", "runtime"]);
+    expect(templates.POST).toEqual(expect.any(Function));
+    expect(exportKeys(plans)).toEqual(["POST", "runtime"]);
+    expect(plans.POST).toEqual(expect.any(Function));
+    expect(exportKeys(sessionsComplete)).toEqual(["POST", "runtime"]);
+    expect(sessionsComplete.POST).toEqual(expect.any(Function));
+    expect(exportKeys(completion)).toEqual(["GET", "runtime"]);
+    expect(completion.GET).toEqual(expect.any(Function));
   });
 
   test("actual route modules force the Node.js runtime", () => {
@@ -195,9 +206,14 @@ describe("Next app route adapter", () => {
 
   test("actual health route modules force the Node.js runtime", async () => {
     const { metrics, metricsImport } = await importHealthRouteModules();
+    const { templates, plans, sessionsComplete, completion } = await importHealthExerciseRouteModules();
 
     expect(metrics.runtime).toBe("nodejs");
     expect(metricsImport.runtime).toBe("nodejs");
+    expect(templates.runtime).toBe("nodejs");
+    expect(plans.runtime).toBe("nodejs");
+    expect(sessionsComplete.runtime).toBe("nodejs");
+    expect(completion.runtime).toBe("nodejs");
   });
 
   test("actual protected route modules accept bearer-authenticated Web requests", async () => {
@@ -356,6 +372,60 @@ describe("Next app route adapter", () => {
     ]);
   });
 
+  test("actual health exercise route modules accept bearer-authenticated Web requests", async () => {
+    const { templates, plans, sessionsComplete, completion } = await importHealthExerciseRouteModules();
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-exercise-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const templateResponse = await templates.POST(
+      jsonRequest("https://example.test/api/health/exercise/templates", {
+        slug: "starter-strength",
+        name: "Starter Strength",
+        defaultDays: [
+          { sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 20 },
+          { sessionKey: "pull", dayOffset: 2, title: "Pull", targetReps: 30 }
+        ]
+      })
+    );
+    const planResponse = await plans.POST(
+      jsonRequest("https://example.test/api/health/exercise/plans", {
+        templateSlug: "starter-strength",
+        weekStart: "2026-06-15"
+      })
+    );
+    const planBody = (await planResponse.clone().json()) as {
+      data: { result: { sessions: Array<{ id: number }> } };
+    };
+    const completeResponse = await sessionsComplete.POST(
+      jsonRequest("https://example.test/api/health/exercise/sessions/complete", {
+        sessionId: planBody.data.result.sessions[0]!.id,
+        completedAt: "2026-06-15T09:00:00.000Z",
+        durationMinutes: 22,
+        intensity: "moderate"
+      })
+    );
+    const summaryResponse = await completion.GET(
+      new Request("https://example.test/api/health/exercise/completion?from=2026-06-15&to=2026-06-22", {
+        headers: { authorization: "Bearer env-secret" }
+      })
+    );
+    const responses = [templateResponse, planResponse, completeResponse, summaryResponse];
+    const summaryBody = (await summaryResponse.clone().json()) as {
+      data: { summary: { planned: number; completed: number; missed: number; rate: number } };
+    };
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+    await expectResponseRouteIds(responses, [
+      "health.exercise.templates.create",
+      "health.exercise.plans.create",
+      "health.exercise.sessions.complete",
+      "health.exercise.completion"
+    ]);
+    expect(summaryBody.data.summary).toMatchObject({ planned: 2, completed: 1, missed: 1, rate: 0.5 });
+  });
+
   test("actual protected route modules reject missing configured bearer tokens before body handling", async () => {
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-config-${Date.now()}.db`);
     tempFiles.push(dbPath);
@@ -398,6 +468,7 @@ describe("Next app route adapter", () => {
 
   test("actual mutation route modules reject unauthenticated Web requests before body handling", async () => {
     const { metrics, metricsImport } = await importHealthRouteModules();
+    const { templates, plans, sessionsComplete } = await importHealthExerciseRouteModules();
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-mutations-${Date.now()}.db`);
     tempFiles.push(dbPath);
     process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
@@ -426,6 +497,21 @@ describe("Next app route adapter", () => {
         routeId: "health.metrics.import",
         handler: metricsImport.POST,
         url: "https://example.test/api/health/metrics/import"
+      },
+      {
+        routeId: "health.exercise.templates.create",
+        handler: templates.POST,
+        url: "https://example.test/api/health/exercise/templates"
+      },
+      {
+        routeId: "health.exercise.plans.create",
+        handler: plans.POST,
+        url: "https://example.test/api/health/exercise/plans"
+      },
+      {
+        routeId: "health.exercise.sessions.complete",
+        handler: sessionsComplete.POST,
+        url: "https://example.test/api/health/exercise/sessions/complete"
       }
     ] as const;
 
@@ -441,23 +527,36 @@ describe("Next app route adapter", () => {
   });
 
   test("actual mutation route modules reject unauthenticated malformed JSON before parsing the body", async () => {
+    const { templates } = await importHealthExerciseRouteModules();
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-malformed-${Date.now()}.db`);
     tempFiles.push(dbPath);
     process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
     process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
 
-    const response = await quizGradePost(
+    const quizResponse = await quizGradePost(
       new Request("https://example.test/api/quiz/grade", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{\"conceptSlug\":"
       })
     );
+    const templateResponse = await templates.POST(
+      new Request("https://example.test/api/health/exercise/templates", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"slug\":"
+      })
+    );
 
-    expect(response.status).toBe(401);
-    expect(await response.json()).toMatchObject({
+    expect(quizResponse.status).toBe(401);
+    expect(await quizResponse.json()).toMatchObject({
       ok: false,
       error: { code: "unauthorized", routeId: "quiz.grade" }
+    });
+    expect(templateResponse.status).toBe(401);
+    expect(await templateResponse.json()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "health.exercise.templates.create" }
     });
   });
 
@@ -704,6 +803,10 @@ async function expectResponseRouteIds(responses: readonly Response[], routeIds: 
   expect(bodies.map((body) => body.routeId)).toEqual(routeIds);
 }
 
+function exportKeys(module: object): string[] {
+  return Object.keys(module).sort();
+}
+
 interface HealthRouteModule {
   readonly runtime: string;
   readonly GET: AppRouteHandler;
@@ -724,4 +827,30 @@ async function importHealthRouteModules(): Promise<{
   const metricsImport = (await import("../health/metrics/import/route.js")) as HealthImportRouteModule;
 
   return { metrics, metricsImport };
+}
+
+interface ExercisePostRouteModule {
+  readonly runtime: string;
+  readonly POST: AppRouteHandler;
+}
+
+interface ExerciseCompletionRouteModule {
+  readonly runtime: string;
+  readonly GET: AppRouteHandler;
+}
+
+async function importHealthExerciseRouteModules(): Promise<{
+  readonly templates: ExercisePostRouteModule;
+  readonly plans: ExercisePostRouteModule;
+  readonly sessionsComplete: ExercisePostRouteModule;
+  readonly completion: ExerciseCompletionRouteModule;
+}> {
+  const templates = (await import("../health/exercise/templates/route.js")) as ExercisePostRouteModule;
+  const plans = (await import("../health/exercise/plans/route.js")) as ExercisePostRouteModule;
+  const sessionsComplete = (await import(
+    "../health/exercise/sessions/complete/route.js"
+  )) as ExercisePostRouteModule;
+  const completion = (await import("../health/exercise/completion/route.js")) as ExerciseCompletionRouteModule;
+
+  return { templates, plans, sessionsComplete, completion };
 }

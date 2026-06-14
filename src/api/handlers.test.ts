@@ -7,6 +7,11 @@ import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents } from "../db/trace-store.js";
 import { upsertPersistentReviewSchedule } from "../engine/persistent-review.js";
 import type { DocRef, RawDoc, SourceAdapter } from "../engine/source-adapter.js";
+import {
+  completeExerciseSession,
+  createExercisePlanFromTemplate,
+  createExerciseTemplate
+} from "../health-extensions/exercise.js";
 import { createHealthMetric } from "../health-extensions/metrics.js";
 import type { ApiRouteId } from "./contracts.js";
 import { handleApiRequest, type ApiHandlerContext, type ApiRequest } from "./handlers.js";
@@ -354,6 +359,300 @@ describe("pure API request handlers", () => {
     ["update", "PATCH", "/api/health/metrics", { id: 1, value: 58.0 }, "health.metrics.update"],
     ["import", "POST", "/api/health/metrics/import", { sourceFilename: "metrics.csv" }, "health.metrics.import"]
   ])("health metric endpoint returns 400 for malformed %s request", async (_name, method, path, body, routeId) => {
+    const response = await handleApiRequest(authRequest(method as ApiRequest["method"], path, body), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId }
+    });
+  });
+
+  test.each([
+    ["template create", "POST", "/api/health/exercise/templates", {}, "health.exercise.templates.create"],
+    ["plan create", "POST", "/api/health/exercise/plans", {}, "health.exercise.plans.create"],
+    ["session complete", "POST", "/api/health/exercise/sessions/complete", {}, "health.exercise.sessions.complete"],
+    ["completion read", "GET", "/api/health/exercise/completion?from=2026-06-15&to=2026-06-22", undefined, "health.exercise.completion"]
+  ])("exercise %s route rejects missing bearer auth", async (_name, method, path, body, routeId) => {
+    const response = await handleApiRequest(request(method as ApiRequest["method"], path, body), context());
+
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId }
+    });
+  });
+
+  test("POST /api/health/exercise/templates creates a reusable template", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/templates", {
+        slug: "starter-strength",
+        name: "Starter Strength",
+        description: "first week",
+        defaultDays: [
+          { sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 20 },
+          { sessionKey: "pull", dayOffset: 2, title: "Pull", targetReps: 30 }
+        ]
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.exercise.templates.create" });
+    const data = responseData<ExerciseTemplateCreateData>(response);
+    expect(data.result).toMatchObject({
+      created: true,
+      template: {
+        slug: "starter-strength",
+        name: "Starter Strength",
+        description: "first week",
+        active: true,
+        defaultDays: [
+          { sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 20 },
+          { sessionKey: "pull", dayOffset: 2, title: "Pull", targetReps: 30 }
+        ]
+      }
+    });
+    expect(countRows("exercise_templates")).toBe(1);
+  });
+
+  test("POST /api/health/exercise/plans creates sessions from a template", async () => {
+    seedExerciseTemplate();
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/plans", {
+        templateSlug: "starter-strength",
+        weekStart: "2026-06-15"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.exercise.plans.create" });
+    const data = responseData<ExercisePlanCreateData>(response);
+    expect(data.result.plan).toMatchObject({ weekStart: "2026-06-15", status: "active" });
+    expect(data.result.template).toMatchObject({ slug: "starter-strength" });
+    expect(data.result.sessions).toMatchObject([
+      {
+        templateSessionKey: "push",
+        scheduledFor: "2026-06-15T00:00:00.000Z",
+        status: "planned",
+        durationMinutes: 20
+      },
+      {
+        templateSessionKey: "pull",
+        scheduledFor: "2026-06-17T00:00:00.000Z",
+        status: "planned"
+      }
+    ]);
+    expect(countRows("exercise_plans")).toBe(1);
+    expect(countRows("exercise_sessions")).toBe(2);
+  });
+
+  test("POST /api/health/exercise/sessions/complete completes a planned session", async () => {
+    const plan = seedExercisePlan();
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/sessions/complete", {
+        sessionId: plan.sessions[0]!.id,
+        completedAt: "2026-06-15T09:00:00.000Z",
+        durationMinutes: 22,
+        intensity: "moderate",
+        note: "felt solid"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.exercise.sessions.complete" });
+    const data = responseData<ExerciseSessionCompleteData>(response);
+    expect(data.result.session).toMatchObject({
+      id: plan.sessions[0]!.id,
+      status: "completed",
+      completedAt: "2026-06-15T09:00:00.000Z",
+      durationMinutes: 22,
+      intensity: "moderate",
+      note: "felt solid"
+    });
+  });
+
+  test("POST /api/health/exercise/sessions/complete completes by plan id and template session key", async () => {
+    const plan = seedExercisePlan();
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/sessions/complete", {
+        planId: plan.plan.id,
+        templateSessionKey: "pull",
+        completedAt: "2026-06-17T09:00:00.000Z",
+        intensity: "high"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.exercise.sessions.complete" });
+    const data = responseData<ExerciseSessionCompleteData>(response);
+    expect(data.result.session).toMatchObject({
+      id: plan.sessions[1]!.id,
+      planId: plan.plan.id,
+      status: "completed",
+      completedAt: "2026-06-17T09:00:00.000Z",
+      intensity: "high"
+    });
+    expect(countRows("exercise_sessions")).toBe(2);
+  });
+
+  test("POST /api/health/exercise/sessions/complete records an ad hoc session", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/sessions/complete", {
+        completedAt: "2026-06-16T12:00:00.000Z",
+        durationMinutes: 10,
+        intensity: "low",
+        note: "walk"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.exercise.sessions.complete" });
+    const data = responseData<ExerciseSessionCompleteData>(response);
+    expect(data.result.session).toMatchObject({
+      status: "ad_hoc",
+      completedAt: "2026-06-16T12:00:00.000Z",
+      durationMinutes: 10,
+      intensity: "low",
+      note: "walk"
+    });
+    expect(data.result.session.planId).toBeUndefined();
+  });
+
+  test("GET /api/health/exercise/completion summarizes planned and ad hoc sessions", async () => {
+    const plan = seedExercisePlan();
+    completeExerciseSession(db, {
+      sessionId: plan.sessions[0]!.id,
+      completedAt: "2026-06-15T09:00:00.000Z",
+      durationMinutes: 22,
+      intensity: "moderate"
+    });
+    completeExerciseSession(db, {
+      completedAt: "2026-06-16T12:00:00.000Z",
+      durationMinutes: 10,
+      intensity: "low"
+    });
+
+    const response = await handleApiRequest(
+      authRequest("GET", "/api/health/exercise/completion?from=2026-06-15&to=2026-06-22"),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.exercise.completion" });
+    const data = responseData<ExerciseCompletionData>(response);
+    expect(data.summary).toMatchObject({
+      planned: 2,
+      completed: 1,
+      missed: 1,
+      rate: 0.5,
+      sessions: [
+        { id: plan.sessions[0]!.id, status: "completed" },
+        { id: plan.sessions[1]!.id, status: "missed" }
+      ],
+      adHocSessions: [{ status: "ad_hoc", completedAt: "2026-06-16T12:00:00.000Z" }]
+    });
+  });
+
+  test("GET /api/health/exercise/completion rejects from after to without mutating exercise rows", async () => {
+    seedExercisePlan();
+    const sessionsBefore = countRows("exercise_sessions");
+    const templatesBefore = countRows("exercise_templates");
+    const plansBefore = countRows("exercise_plans");
+
+    const response = await handleApiRequest(
+      authRequest("GET", "/api/health/exercise/completion?from=2026-06-22&to=2026-06-15"),
+      context()
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "health.exercise.completion" }
+    });
+    expect(countRows("exercise_sessions")).toBe(sessionsBefore);
+    expect(countRows("exercise_templates")).toBe(templatesBefore);
+    expect(countRows("exercise_plans")).toBe(plansBefore);
+  });
+
+  test("POST /api/health/exercise/templates rejects invalid default day entries without exercise rows", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/templates", {
+        slug: "bad-template",
+        name: "Bad Template",
+        defaultDays: [{ sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 0 }]
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "health.exercise.templates.create" }
+    });
+    expect(countRows("exercise_templates")).toBe(0);
+    expect(countRows("exercise_plans")).toBe(0);
+    expect(countRows("exercise_sessions")).toBe(0);
+  });
+
+  test("POST /api/health/exercise/sessions/complete rejects invalid intensity without exercise rows", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/sessions/complete", {
+        completedAt: "2026-06-16T12:00:00.000Z",
+        durationMinutes: 10,
+        intensity: "extreme"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "health.exercise.sessions.complete" }
+    });
+    expect(countRows("exercise_sessions")).toBe(0);
+  });
+
+  test("POST /api/health/exercise/sessions/complete rejects incomplete plan/template targets before mutation", async () => {
+    seedExercisePlan();
+    const sessionsBefore = countRows("exercise_sessions");
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/exercise/sessions/complete", {
+        planId: 1,
+        completedAt: "2026-06-15T09:00:00.000Z"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "health.exercise.sessions.complete" }
+    });
+    expect(countRows("exercise_sessions")).toBe(sessionsBefore);
+  });
+
+  test.each([
+    ["template body", "POST", "/api/health/exercise/templates", { slug: "starter-strength" }, "health.exercise.templates.create"],
+    ["plan body", "POST", "/api/health/exercise/plans", { templateSlug: "starter-strength" }, "health.exercise.plans.create"],
+    [
+      "session completion body",
+      "POST",
+      "/api/health/exercise/sessions/complete",
+      { completedAt: "2026-06-16T12:00:00.000Z", durationMinutes: 0 },
+      "health.exercise.sessions.complete"
+    ],
+    ["completion query", "GET", "/api/health/exercise/completion?from=2026-06-15", undefined, "health.exercise.completion"],
+    ["completion date", "GET", "/api/health/exercise/completion?from=bad&to=2026-06-22", undefined, "health.exercise.completion"]
+  ])("exercise endpoint returns 400 for malformed %s", async (_name, method, path, body, routeId) => {
     const response = await handleApiRequest(authRequest(method as ApiRequest["method"], path, body), context());
 
     expect(response.status).toBe(400);
@@ -1061,6 +1360,25 @@ describe("pure API request handlers", () => {
     });
   }
 
+  function seedExerciseTemplate(): void {
+    createExerciseTemplate(db, {
+      slug: "starter-strength",
+      name: "Starter Strength",
+      defaultDays: [
+        { sessionKey: "push", dayOffset: 0, title: "Push", targetMinutes: 20 },
+        { sessionKey: "pull", dayOffset: 2, title: "Pull", targetReps: 30 }
+      ]
+    });
+  }
+
+  function seedExercisePlan(): ReturnType<typeof createExercisePlanFromTemplate> {
+    seedExerciseTemplate();
+    return createExercisePlanFromTemplate(db, {
+      templateSlug: "starter-strength",
+      weekStart: "2026-06-15"
+    });
+  }
+
   function countRows(table: string): number {
     return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
   }
@@ -1326,6 +1644,75 @@ interface HealthMetricImportData extends Record<string, unknown> {
         source: string;
         createdAt: string;
       };
+    }>;
+  };
+}
+
+interface ExerciseTemplateCreateData extends Record<string, unknown> {
+  result: {
+    created: boolean;
+    template: {
+      slug: string;
+      name: string;
+      description?: string;
+      active: boolean;
+      defaultDays: Array<{
+        sessionKey: string;
+        dayOffset: number;
+        title: string;
+        targetMinutes?: number;
+        targetReps?: number;
+      }>;
+    };
+  };
+}
+
+interface ExercisePlanCreateData extends Record<string, unknown> {
+  result: {
+    plan: {
+      weekStart: string;
+      status: string;
+    };
+    template: {
+      slug: string;
+    };
+    sessions: Array<{
+      id: number;
+      templateSessionKey?: string;
+      scheduledFor?: string;
+      status: string;
+      durationMinutes?: number;
+    }>;
+  };
+}
+
+interface ExerciseSessionCompleteData extends Record<string, unknown> {
+  result: {
+    session: {
+      id: number;
+      planId?: number;
+      status: string;
+      completedAt?: string;
+      durationMinutes?: number;
+      intensity?: string;
+      note?: string;
+    };
+  };
+}
+
+interface ExerciseCompletionData extends Record<string, unknown> {
+  summary: {
+    planned: number;
+    completed: number;
+    missed: number;
+    rate: number;
+    sessions: Array<{
+      id: number;
+      status: string;
+    }>;
+    adHocSessions: Array<{
+      status: string;
+      completedAt?: string;
     }>;
   };
 }

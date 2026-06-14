@@ -11,6 +11,10 @@ import {
 } from "./contracts.js";
 import { listPublicPages } from "../db/content-store.js";
 import { persistTraceEvents } from "../db/trace-store.js";
+import {
+  createPersistentApplicationTask,
+  gradePersistentApplicationAttempt
+} from "../engine/persistent-application.js";
 import { diagnosePersistentWeakSpots } from "../engine/persistent-diagnose.js";
 import { runPersistentMockIngest } from "../engine/persistent-ingest.js";
 import { createPersistentDailyPlan } from "../engine/persistent-plan.js";
@@ -79,6 +83,16 @@ interface TeachbackBody {
   transcript: string;
 }
 
+interface ApplicationTaskBody {
+  conceptSlug: string;
+  difficulty?: number;
+}
+
+interface ApplicationGradeBody {
+  itemId: number;
+  response: string;
+}
+
 class ApiBadRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -124,6 +138,10 @@ export async function handleApiRequest(
         return handleQuizGrade(request, context);
       case "teachback.submit":
         return handleTeachback(request, context);
+      case "application.task.create":
+        return handleApplicationTaskCreate(request, context);
+      case "application.grade":
+        return handleApplicationGrade(request, context);
       case "wiki.pages":
         return successResponse("wiki.pages", { pages: listPublicPages(context.db) });
     }
@@ -207,6 +225,28 @@ function handleTeachback(request: ApiRequest, context: ApiHandlerContext): ApiRe
   return successResponse("teachback.submit", { result });
 }
 
+function handleApplicationTaskCreate(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseApplicationTaskBody(request.body);
+  const result = runMutationWithTrace(context.db, () => createPersistentApplicationTask(context.db, body));
+
+  return successResponse("application.task.create", { result });
+}
+
+function handleApplicationGrade(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseApplicationGradeBody(request.body);
+  const result = runMutationWithTrace(context.db, () =>
+    gradePersistentApplicationAttempt(context.db, {
+      ...body,
+      lastSeenAt: nowDate(context).toISOString()
+    })
+  );
+
+  return successResponse("application.grade", { result });
+}
+
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
   db: Database.Database,
   mutation: () => T
@@ -267,6 +307,25 @@ function parseTeachbackBody(body: unknown): TeachbackBody {
   return {
     conceptSlug: requiredString(record, "conceptSlug"),
     transcript: requiredString(record, "transcript")
+  };
+}
+
+function parseApplicationTaskBody(body: unknown): ApplicationTaskBody {
+  const record = parseBodyRecord(body);
+  const difficulty = optionalDifficulty(record.difficulty);
+
+  return {
+    conceptSlug: requiredString(record, "conceptSlug"),
+    ...(difficulty === undefined ? {} : { difficulty })
+  };
+}
+
+function parseApplicationGradeBody(body: unknown): ApplicationGradeBody {
+  const record = parseBodyRecord(body);
+
+  return {
+    itemId: requiredPositiveInteger(record, "itemId"),
+    response: requiredString(record, "response")
   };
 }
 
@@ -362,6 +421,15 @@ function optionalDifficulty(value: unknown): number | undefined {
   return value;
 }
 
+function requiredPositiveInteger(record: Record<string, unknown>, field: string): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a positive safe integer.`);
+  }
+
+  return value;
+}
+
 function adapterIdFromPath(path: string): string | undefined {
   try {
     const url = new URL(path, "https://knowledge-loop.local");
@@ -429,6 +497,10 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
       return isQuizInputError(error.message);
     case "teachback.submit":
       return isTeachbackInputError(error.message);
+    case "application.task.create":
+      return isApplicationTaskInputError(error.message);
+    case "application.grade":
+      return isApplicationGradeInputError(error.message);
     default:
       return false;
   }
@@ -451,6 +523,26 @@ function isTeachbackInputError(message: string): boolean {
     /^No page was found for concept [^\s]+\.$/.test(message) ||
     message === "Persistent teach-back grading requires a non-empty transcript." ||
     message === "Persistent teach-back grading requires a non-empty concept slug."
+  );
+}
+
+function isApplicationTaskInputError(message: string): boolean {
+  return (
+    /^Concept [^\s]+ was not found\.$/.test(message) ||
+    /^No page was found for concept [^\s]+\.$/.test(message) ||
+    /^Page \d+ has no extractable application rubric keywords\.$/.test(message) ||
+    message === "Persistent application task requires a non-empty concept slug." ||
+    message === "Persistent application difficulty must be an integer between 1 and 5."
+  );
+}
+
+function isApplicationGradeInputError(message: string): boolean {
+  return (
+    /^Item \d+ was not found\.$/.test(message) ||
+    /^Item \d+ is not a free-form application item\.$/.test(message) ||
+    /^Item \d+ does not contain a valid application rubric\.$/.test(message) ||
+    message === "Persistent application grading requires a positive item id." ||
+    message === "Persistent application grading requires a non-empty response."
   );
 }
 

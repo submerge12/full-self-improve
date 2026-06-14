@@ -341,6 +341,211 @@ describe("pure API request handlers", () => {
     });
   });
 
+  test("POST application task creates a free-form item and persists trace events", async () => {
+    seedTeachbackConcept(
+      "retrieval-practice",
+      "Retrieval Practice",
+      "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+    );
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/application/task", {
+        conceptSlug: "retrieval-practice",
+        difficulty: 4
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "application.task.create" });
+    const data = responseData<ApplicationTaskData>(response);
+    expect(data.result).toMatchObject({
+      conceptSlug: "retrieval-practice",
+      difficulty: 4,
+      answerSpec: {
+        type: "rubric",
+        kind: "application",
+        conceptSlug: "retrieval-practice"
+      }
+    });
+    expect(readApplicationItems()).toEqual([
+      expect.objectContaining({
+        id: data.result.itemId,
+        type: "free_form",
+        difficulty: 4,
+        statement: data.result.statement
+      })
+    ]);
+    expect(listTraceEvents(db, { runId: data.result.runId })).toMatchObject([
+      {
+        stage: "plan",
+        level: "info",
+        message: "Application task generated"
+      }
+    ]);
+  });
+
+  test("POST application grade writes attempt and mastery and persists trace events", async () => {
+    seedTeachbackConcept(
+      "retrieval-practice",
+      "Retrieval Practice",
+      "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+    );
+    const task = await handleApiRequest(
+      authRequest("POST", "/api/application/task", { conceptSlug: "retrieval-practice" }),
+      context()
+    );
+    const taskData = responseData<ApplicationTaskData>(task);
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/application/grade", {
+        itemId: taskData.result.itemId,
+        response:
+          "Retrieval practice uses transfer of knowledge in realistic planning scenarios with constraints and feedback."
+      }),
+      context({ now: fixedNow })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "application.grade" });
+    const data = responseData<ApplicationGradeData>(response);
+    expect(data.result).toMatchObject({
+      itemId: taskData.result.itemId,
+      conceptSlug: "retrieval-practice",
+      verdict: "correct",
+      gradingMethod: "rubric",
+      mastery: {
+        score: 0.12,
+        confidence: 0.85,
+        attemptsN: 1,
+        lastSeenAt: "2026-06-13T08:00:00.000Z"
+      }
+    });
+    expect(countRows("attempts")).toBe(1);
+    expect(countRows("mastery")).toBe(1);
+    expect(listTraceEvents(db, { runId: data.result.runId }).map((event) => event.message)).toEqual([
+      "Mastery updated",
+      "Application attempt graded"
+    ]);
+  });
+
+  test.each([
+    ["missing conceptSlug", "/api/application/task", {}, "application.task.create"],
+    ["blank conceptSlug", "/api/application/task", { conceptSlug: "   " }, "application.task.create"],
+    [
+      "bad difficulty",
+      "/api/application/task",
+      { conceptSlug: "retrieval-practice", difficulty: 6 },
+      "application.task.create"
+    ],
+    ["bad itemId", "/api/application/grade", { itemId: 0, response: "answer" }, "application.grade"],
+    ["blank response", "/api/application/grade", { itemId: 1, response: "   " }, "application.grade"]
+  ])("POST application endpoints return 400 for malformed body: %s", async (_name, path, body, routeId) => {
+    const response = await handleApiRequest(authRequest("POST", path, body), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId }
+    });
+  });
+
+  test("POST application task returns 400 for missing concept or missing page", async () => {
+    createConcept(db, { slug: "no-page", name: "No Page", status: "generated" });
+
+    const missingConcept = await handleApiRequest(
+      authRequest("POST", "/api/application/task", { conceptSlug: "missing" }),
+      context()
+    );
+    const missingPage = await handleApiRequest(
+      authRequest("POST", "/api/application/task", { conceptSlug: "no-page" }),
+      context()
+    );
+
+    expect(missingConcept.status).toBe(400);
+    expect(missingConcept.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "application.task.create" }
+    });
+    expect(missingPage.status).toBe(400);
+    expect(missingPage.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "application.task.create" }
+    });
+  });
+
+  test("POST application grade returns 400 for a missing item", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/application/grade", { itemId: 999, response: "anything" }),
+      context({ now: fixedNow })
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "application.grade" }
+    });
+  });
+
+  test("POST application task rolls back item creation when trace persistence fails", async () => {
+    seedTeachbackConcept(
+      "retrieval-practice",
+      "Retrieval Practice",
+      "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+    );
+    failTraceEventInserts();
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/application/task", { conceptSlug: "retrieval-practice" }),
+      context()
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "unexpected_error", routeId: "application.task.create" }
+    });
+    expect(countRows("items")).toBe(0);
+    expect(countRows("trace_events")).toBe(0);
+  });
+
+  test("POST application grade rolls back attempt and mastery when trace persistence fails", async () => {
+    seedTeachbackConcept(
+      "retrieval-practice",
+      "Retrieval Practice",
+      "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+    );
+    const task = await handleApiRequest(
+      authRequest("POST", "/api/application/task", { conceptSlug: "retrieval-practice" }),
+      context()
+    );
+    const taskData = responseData<ApplicationTaskData>(task);
+    const baseline = {
+      attempts: countRows("attempts"),
+      mastery: countRows("mastery"),
+      traceEvents: countRows("trace_events")
+    };
+    failTraceEventInserts();
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/application/grade", {
+        itemId: taskData.result.itemId,
+        response:
+          "Retrieval practice uses transfer of knowledge in realistic planning scenarios with constraints and feedback."
+      }),
+      context({ now: fixedNow })
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "unexpected_error", routeId: "application.grade" }
+    });
+    expect(countRows("attempts")).toBe(baseline.attempts);
+    expect(countRows("mastery")).toBe(baseline.mastery);
+    expect(countRows("trace_events")).toBe(baseline.traceEvents);
+  });
+
   test("GET mastery summary returns mastery rows and weak spots, and persists diagnose trace events", async () => {
     const concept = createConcept(db, { slug: "weak", name: "Weak", status: "generated" });
     recordMasteryUpdate(db, {
@@ -468,6 +673,26 @@ describe("pure API request handlers", () => {
     `);
   }
 
+  function readApplicationItems(): Array<{
+    id: number;
+    type: string;
+    difficulty: number;
+    statement: string;
+  }> {
+    return db
+      .prepare(
+        `SELECT id, type, difficulty, statement
+         FROM items
+         ORDER BY id`
+      )
+      .all() as Array<{
+      id: number;
+      type: string;
+      difficulty: number;
+      statement: string;
+    }>;
+  }
+
   function context(overrides: Partial<ApiHandlerContext> = {}): ApiHandlerContext {
     return {
       db,
@@ -549,5 +774,36 @@ interface MasterySummaryData extends Record<string, unknown> {
   diagnosis: {
     runId: string;
     weakSpots: unknown[];
+  };
+}
+
+interface ApplicationTaskData extends Record<string, unknown> {
+  result: {
+    runId: string;
+    itemId: number;
+    conceptSlug: string;
+    statement: string;
+    difficulty: number;
+    answerSpec: {
+      type: string;
+      kind: string;
+      conceptSlug: string;
+    };
+  };
+}
+
+interface ApplicationGradeData extends Record<string, unknown> {
+  result: {
+    runId: string;
+    itemId: number;
+    conceptSlug: string;
+    verdict: string;
+    gradingMethod: string;
+    mastery: {
+      score: number;
+      confidence: number;
+      attemptsN: number;
+      lastSeenAt: string | null;
+    };
   };
 }

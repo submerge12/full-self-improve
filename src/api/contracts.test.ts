@@ -20,12 +20,14 @@ const expectedRoutes = [
   { id: "mastery.summary", method: "GET", path: "/api/mastery/summary", auth: "bearer" },
   { id: "quiz.grade", method: "POST", path: "/api/quiz/grade", auth: "bearer" },
   { id: "teachback.submit", method: "POST", path: "/api/teachback", auth: "bearer" },
+  { id: "application.task.create", method: "POST", path: "/api/application/task", auth: "bearer" },
+  { id: "application.grade", method: "POST", path: "/api/application/grade", auth: "bearer" },
   { id: "wiki.pages", method: "GET", path: "/api/wiki/pages?visibility=...", auth: "public_read" }
 ] as const;
 
 describe("API route manifest", () => {
-  test("contains exactly the seven PLAN section 2.5 endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(7);
+  test("contains exactly the documented API endpoints", () => {
+    expect(API_ROUTE_MANIFEST).toHaveLength(9);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -43,7 +45,7 @@ describe("API route manifest", () => {
   test("requires bearer auth for every POST route", () => {
     const postRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST");
 
-    expect(postRoutes).toHaveLength(4);
+    expect(postRoutes).toHaveLength(6);
     expect(postRoutes.every((route) => route.auth === "bearer")).toBe(true);
   });
 

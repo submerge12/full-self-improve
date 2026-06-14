@@ -28,6 +28,8 @@ export const API_ROUTE_IDS = [
   "mastery.summary",
   "quiz.grade",
   "teachback.submit",
+  "application.task.create",
+  "application.grade",
   "wiki.pages"
 ] as const;
 
@@ -83,6 +85,20 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/teachback",
     auth: "bearer",
     description: "Submit a teach-back explanation for rubric grading."
+  },
+  {
+    id: "application.task.create",
+    method: "POST",
+    path: "/api/application/task",
+    auth: "bearer",
+    description: "Generate an application task for a concept."
+  },
+  {
+    id: "application.grade",
+    method: "POST",
+    path: "/api/application/grade",
+    auth: "bearer",
+    description: "Submit an application response for rubric grading."
   },
   {
     id: "wiki.pages",

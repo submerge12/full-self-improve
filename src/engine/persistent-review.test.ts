@@ -1,9 +1,15 @@
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, test } from "vitest";
 
 import { createConcept } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
-import { listDuePersistentReviews, upsertPersistentReviewSchedule } from "./persistent-review.js";
+import { createTraceRecorder } from "./trace.js";
+import {
+  listDuePersistentReviews,
+  recordPersistentReviewAttempt,
+  type RecordPersistentReviewAttemptInput,
+  upsertPersistentReviewSchedule
+} from "./persistent-review.js";
 
 describe("persistent review scheduling", () => {
   let db: Database.Database;
@@ -269,7 +275,270 @@ describe("persistent review scheduling", () => {
     expect(() => listDuePersistentReviews(db, { target: "2026-06-14" })).toThrow(/fsrs_state.*JSON object/);
   });
 
+  test("records a good review attempt, advances due date, preserves opaque state, updates mastery and trace", () => {
+    const concept = createConcept(db, { slug: "spacing-effect", name: "Spacing Effect", status: "generated" });
+    const trace = createTraceRecorder({
+      now: () => new Date("2026-06-14T08:05:00.000Z")
+    });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: concept.id,
+      fsrsState: {
+        stability: 2.5,
+        opaque: { scheduler: "mock", nested: [true, null] },
+        reviewCount: 2,
+        lapses: 1
+      },
+      dueAt: "2026-06-13T00:00:00.000Z"
+    });
+
+    const result = recordPersistentReviewAttempt(db, {
+      conceptSlug: "spacing-effect",
+      rating: "good",
+      reviewedAt: "2026-06-14T08:00:00+08:00",
+      runId: "review-run",
+      trace
+    });
+
+    expect(result).toMatchObject({
+      runId: "review-run",
+      conceptSlug: "spacing-effect",
+      rating: "good",
+      reviewedAt: "2026-06-14T00:00:00.000Z",
+      previousDueAt: "2026-06-13T00:00:00.000Z",
+      nextDueAt: "2026-06-18T00:00:00.000Z",
+      masteryDelta: 0.06
+    });
+    expect(result.fsrsState).toEqual({
+      stability: 2.5,
+      opaque: { scheduler: "mock", nested: [true, null] },
+      reviewCount: 3,
+      lapses: 1,
+      lastRating: "good",
+      lastReviewedAt: "2026-06-14T00:00:00.000Z",
+      nextIntervalDays: 4
+    });
+    expect(result.mastery).toMatchObject({
+      conceptId: concept.id,
+      score: 0.06,
+      confidence: 0.8,
+      attemptsN: 1,
+      lastSeenAt: "2026-06-14T00:00:00.000Z"
+    });
+    expect(getReviewRow(concept.id)).toEqual({
+      dueAt: "2026-06-18T00:00:00.000Z",
+      fsrsState: JSON.stringify(result.fsrsState)
+    });
+    expect(result.traceEvents).toHaveLength(2);
+    expect(result.traceEvents.map((event) => event.stage)).toEqual(["grade", "grade"]);
+    expect(result.traceEvents[0]).toMatchObject({
+      runId: "review-run",
+      stage: "grade",
+      level: "info",
+      message: "Review attempt recorded",
+      data: {
+        outcome: "accepted",
+        rating: "good",
+        conceptSlug: "spacing-effect",
+        nextDueAt: "2026-06-18T00:00:00.000Z",
+        masteryDelta: 0.06
+      }
+    });
+    expect(result.traceEvents[1]).toMatchObject({
+      message: "Mastery updated",
+      data: {
+        outcome: "accepted",
+        conceptId: concept.id,
+        score: 0.06,
+        confidence: 0.8,
+        attemptsN: 1,
+        lastSeenAt: "2026-06-14T00:00:00.000Z"
+      }
+    });
+  });
+
+  test("exposes reviewedAt as a required review attempt input field", () => {
+    expectTypeOf<RecordPersistentReviewAttemptInput["reviewedAt"]>().toEqualTypeOf<string | Date>();
+  });
+
+  test("uses rating-specific intervals, mastery deltas, confidence, lapses, and review counts", () => {
+    const cases = [
+      { rating: "again", intervalDays: 1, masteryDelta: -0.08, confidence: 0.4, expectedLapses: 3 },
+      { rating: "hard", intervalDays: 2, masteryDelta: -0.02, confidence: 0.4, expectedLapses: 2 },
+      { rating: "good", intervalDays: 4, masteryDelta: 0.06, confidence: 0.8, expectedLapses: 2 },
+      { rating: "easy", intervalDays: 7, masteryDelta: 0.1, confidence: 0.8, expectedLapses: 2 }
+    ] as const;
+
+    for (const spec of cases) {
+      const concept = createConcept(db, {
+        slug: `rating-${spec.rating}`,
+        name: `Rating ${spec.rating}`,
+        status: "generated"
+      });
+      upsertPersistentReviewSchedule(db, {
+        conceptId: concept.id,
+        fsrsState: { reviewCount: 4, lapses: 2 },
+        dueAt: "2026-06-14T00:00:00.000Z"
+      });
+
+      const result = recordPersistentReviewAttempt(db, {
+        conceptSlug: concept.slug,
+        rating: spec.rating,
+        reviewedAt: "2026-06-15T00:00:00.000Z",
+        runId: `run-${spec.rating}`
+      });
+
+      expect(result.masteryDelta).toBe(spec.masteryDelta);
+      expect(result.nextDueAt).toBe(`2026-06-${15 + spec.intervalDays}T00:00:00.000Z`);
+      expect(result.fsrsState).toMatchObject({
+        lastRating: spec.rating,
+        reviewCount: 5,
+        lapses: spec.expectedLapses,
+        lastReviewedAt: "2026-06-15T00:00:00.000Z",
+        nextIntervalDays: spec.intervalDays
+      });
+      expect(result.mastery).toMatchObject({
+        score: Math.max(0, spec.masteryDelta),
+        confidence: spec.confidence,
+        attemptsN: 1,
+        lastSeenAt: "2026-06-15T00:00:00.000Z"
+      });
+    }
+  });
+
+  test("rejects invalid rating, reviewedAt, missing review, and missing concept without partial writes", () => {
+    const concept = createConcept(db, { slug: "invalid-review", name: "Invalid Review", status: "generated" });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: concept.id,
+      fsrsState: { reviewCount: 1, lapses: 0 },
+      dueAt: "2026-06-14T00:00:00.000Z"
+    });
+
+    for (const input of [
+      { conceptSlug: "invalid-review", rating: "later", reviewedAt: "2026-06-14T00:00:00.000Z" },
+      { conceptSlug: "invalid-review", rating: "good" },
+      { conceptSlug: "invalid-review", rating: "good", reviewedAt: "2026-02-31" },
+      { conceptSlug: "no-schedule", rating: "good", reviewedAt: "2026-06-14T00:00:00.000Z" },
+      { conceptSlug: "missing-concept", rating: "good", reviewedAt: "2026-06-14T00:00:00.000Z" }
+    ]) {
+      if (input.conceptSlug === "no-schedule") {
+        createConcept(db, { slug: "no-schedule", name: "No Schedule", status: "generated" });
+      }
+
+      expect(() =>
+        recordPersistentReviewAttempt(db, input as unknown as RecordPersistentReviewAttemptInput)
+      ).toThrow(/rating|reviewedAt|Review schedule|Concept/);
+      expect(getReviewRow(concept.id)).toEqual({
+        dueAt: "2026-06-14T00:00:00.000Z",
+        fsrsState: JSON.stringify({ reviewCount: 1, lapses: 0 })
+      });
+      expect(countMastery()).toBe(0);
+    }
+  });
+
+  test("rejects corrupt stored fsrs_state without partial writes", () => {
+    const concept = createConcept(db, { slug: "corrupt-review", name: "Corrupt Review", status: "generated" });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: concept.id,
+      fsrsState: { reviewCount: 1, lapses: 0 },
+      dueAt: "2026-06-14T00:00:00.000Z"
+    });
+    db.prepare(
+      `INSERT INTO mastery (concept_id, score, confidence, attempts_n, last_seen_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(concept.id, 0.5, 0.8, 3, "2026-06-13T00:00:00.000Z");
+    db.prepare("UPDATE reviews SET fsrs_state = ? WHERE concept_id = ?").run("[]", concept.id);
+
+    expect(() =>
+      recordPersistentReviewAttempt(db, {
+        conceptSlug: "corrupt-review",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
+      })
+    ).toThrow(/fsrs_state.*JSON object/);
+
+    expect(getReviewRow(concept.id)).toEqual({
+      dueAt: "2026-06-14T00:00:00.000Z",
+      fsrsState: "[]"
+    });
+    expect(getMasteryRow(concept.id)).toEqual({
+      score: 0.5,
+      confidence: 0.8,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-13T00:00:00.000Z"
+    });
+  });
+
+  test("clamps review mastery at 0 and 1", () => {
+    const low = createConcept(db, { slug: "low-clamp", name: "Low Clamp", status: "generated" });
+    const high = createConcept(db, { slug: "high-clamp", name: "High Clamp", status: "generated" });
+    for (const concept of [low, high]) {
+      upsertPersistentReviewSchedule(db, {
+        conceptId: concept.id,
+        fsrsState: {},
+        dueAt: "2026-06-14T00:00:00.000Z"
+      });
+    }
+    db.prepare(
+      `INSERT INTO mastery (concept_id, score, confidence, attempts_n, last_seen_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(low.id, 0.03, 0.8, 1, "2026-06-13T00:00:00.000Z");
+    db.prepare(
+      `INSERT INTO mastery (concept_id, score, confidence, attempts_n, last_seen_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(high.id, 0.96, 0.8, 1, "2026-06-13T00:00:00.000Z");
+
+    const lowResult = recordPersistentReviewAttempt(db, {
+      conceptSlug: "low-clamp",
+      rating: "again",
+      reviewedAt: "2026-06-14T00:00:00.000Z"
+    });
+    const highResult = recordPersistentReviewAttempt(db, {
+      conceptSlug: "high-clamp",
+      rating: "easy",
+      reviewedAt: "2026-06-14T00:00:00.000Z"
+    });
+
+    expect(lowResult.mastery.score).toBe(0);
+    expect(highResult.mastery.score).toBe(1);
+    expect(lowResult.mastery.attemptsN).toBe(2);
+    expect(highResult.mastery.attemptsN).toBe(2);
+  });
+
   function countReviews(): number {
     return (db.prepare("SELECT COUNT(*) AS count FROM reviews").get() as { count: number }).count;
+  }
+
+  function countMastery(): number {
+    return (db.prepare("SELECT COUNT(*) AS count FROM mastery").get() as { count: number }).count;
+  }
+
+  function getReviewRow(conceptId: number): { dueAt: string; fsrsState: string } {
+    return db
+      .prepare(
+        `SELECT due_at AS dueAt, fsrs_state AS fsrsState
+         FROM reviews
+         WHERE concept_id = ?`
+      )
+      .get(conceptId) as { dueAt: string; fsrsState: string };
+  }
+
+  function getMasteryRow(conceptId: number): {
+    score: number;
+    confidence: number;
+    attemptsN: number;
+    lastSeenAt: string | null;
+  } {
+    return db
+      .prepare(
+        `SELECT score, confidence, attempts_n AS attemptsN, last_seen_at AS lastSeenAt
+         FROM mastery
+         WHERE concept_id = ?`
+      )
+      .get(conceptId) as {
+      score: number;
+      confidence: number;
+      attemptsN: number;
+      lastSeenAt: string | null;
+    };
   }
 });

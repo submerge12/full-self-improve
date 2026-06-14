@@ -21,6 +21,8 @@ import { POST as planGeneratePost, runtime as planGenerateRuntime } from "../pla
 import { GET as masterySummaryGet, runtime as masterySummaryRuntime } from "../mastery/summary/route.js";
 import { POST as quizGradePost, runtime as quizGradeRuntime } from "../quiz/grade/route.js";
 import { POST as teachbackPost, runtime as teachbackRuntime } from "../teachback/route.js";
+import { POST as applicationTaskPost, runtime as applicationTaskRuntime } from "../application/task/route.js";
+import { POST as applicationGradePost, runtime as applicationGradeRuntime } from "../application/grade/route.js";
 import { GET as wikiPagesGet, runtime as wikiPagesRuntime } from "../wiki/pages/route.js";
 
 describe("Next app route adapter", () => {
@@ -157,6 +159,8 @@ describe("Next app route adapter", () => {
     expect(masterySummaryGet).toEqual(expect.any(Function));
     expect(quizGradePost).toEqual(expect.any(Function));
     expect(teachbackPost).toEqual(expect.any(Function));
+    expect(applicationTaskPost).toEqual(expect.any(Function));
+    expect(applicationGradePost).toEqual(expect.any(Function));
     expect(wikiPagesGet).toEqual(expect.any(Function));
   });
 
@@ -167,6 +171,8 @@ describe("Next app route adapter", () => {
     expect(masterySummaryRuntime).toBe("nodejs");
     expect(quizGradeRuntime).toBe("nodejs");
     expect(teachbackRuntime).toBe("nodejs");
+    expect(applicationTaskRuntime).toBe("nodejs");
+    expect(applicationGradeRuntime).toBe("nodejs");
     expect(wikiPagesRuntime).toBe("nodejs");
   });
 
@@ -183,6 +189,23 @@ describe("Next app route adapter", () => {
     process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
     process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
     process.env.KNOWLEDGE_LOOP_VAULT_ROOT = vaultRoot;
+
+    const applicationTaskResponse = await applicationTaskPost(
+      jsonRequest("https://example.test/api/application/task", {
+        conceptSlug: "application-topic",
+        difficulty: 4
+      })
+    );
+    const applicationTaskBody = (await applicationTaskResponse.clone().json()) as {
+      data: { result: { itemId: number } };
+    };
+    const applicationGradeResponse = await applicationGradePost(
+      jsonRequest("https://example.test/api/application/grade", {
+        itemId: applicationTaskBody.data.result.itemId,
+        response:
+          "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+      })
+    );
 
     const responses = [
       await ingestRunPost(
@@ -220,17 +243,21 @@ describe("Next app route adapter", () => {
           conceptSlug: "teachback-topic",
           transcript: "Teachback topics use active recall and cited source evidence."
         })
-      )
+      ),
+      applicationTaskResponse,
+      applicationGradeResponse
     ];
 
-    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
     await expectResponseRouteIds(responses, [
       "ingest.run",
       "plan.today",
       "plan.generate",
       "mastery.summary",
       "quiz.grade",
-      "teachback.submit"
+      "teachback.submit",
+      "application.task.create",
+      "application.grade"
     ]);
   });
 
@@ -284,7 +311,13 @@ describe("Next app route adapter", () => {
       { routeId: "ingest.run", handler: ingestRunPost, url: "https://example.test/api/ingest/run?adapter=fixture" },
       { routeId: "plan.generate", handler: planGeneratePost, url: "https://example.test/api/plan/generate" },
       { routeId: "quiz.grade", handler: quizGradePost, url: "https://example.test/api/quiz/grade" },
-      { routeId: "teachback.submit", handler: teachbackPost, url: "https://example.test/api/teachback" }
+      { routeId: "teachback.submit", handler: teachbackPost, url: "https://example.test/api/teachback" },
+      {
+        routeId: "application.task.create",
+        handler: applicationTaskPost,
+        url: "https://example.test/api/application/task"
+      },
+      { routeId: "application.grade", handler: applicationGradePost, url: "https://example.test/api/application/grade" }
     ] as const;
 
     for (const route of mutationRoutes) {
@@ -507,6 +540,27 @@ function seedAuthenticatedRouteData(dbPath: string): void {
       version: 1,
       markdown: "Teachback topics use active recall and cited source evidence.",
       citationIds: [chunk.id],
+      visibility: "private"
+    });
+
+    const applicationConcept = createConcept(db, {
+      slug: "application-topic",
+      name: "Application Topic",
+      status: "generated"
+    });
+    const { chunk: applicationChunk } = createSourceWithChunk(db, {
+      adapterId: "fixture",
+      docRef: "application.md",
+      title: "Application",
+      fingerprint: "application",
+      chunkText:
+        "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+    });
+    createPage(db, {
+      conceptId: applicationConcept.id,
+      version: 1,
+      markdown: "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback.",
+      citationIds: [applicationChunk.id],
       visibility: "private"
     });
   } finally {

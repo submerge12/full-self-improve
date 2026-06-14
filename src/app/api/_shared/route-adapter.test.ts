@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createPage, createSourceWithChunk } from "../../../db/content-store.js";
 import { createConcept } from "../../../db/graph-store.js";
 import { applyMigrations, listTables } from "../../../db/migrations.js";
+import { upsertPersistentReviewSchedule } from "../../../engine/persistent-review.js";
 import type { ApiRequest } from "../../../api/handlers.js";
 import {
   __routeAdapterInternals,
@@ -23,6 +24,8 @@ import { POST as quizGradePost, runtime as quizGradeRuntime } from "../quiz/grad
 import { POST as teachbackPost, runtime as teachbackRuntime } from "../teachback/route.js";
 import { POST as applicationTaskPost, runtime as applicationTaskRuntime } from "../application/task/route.js";
 import { POST as applicationGradePost, runtime as applicationGradeRuntime } from "../application/grade/route.js";
+import { GET as reviewDueGet, runtime as reviewDueRuntime } from "../review/due/route.js";
+import { POST as reviewAttemptPost, runtime as reviewAttemptRuntime } from "../review/attempt/route.js";
 import { GET as wikiPagesGet, runtime as wikiPagesRuntime } from "../wiki/pages/route.js";
 
 describe("Next app route adapter", () => {
@@ -161,6 +164,8 @@ describe("Next app route adapter", () => {
     expect(teachbackPost).toEqual(expect.any(Function));
     expect(applicationTaskPost).toEqual(expect.any(Function));
     expect(applicationGradePost).toEqual(expect.any(Function));
+    expect(reviewDueGet).toEqual(expect.any(Function));
+    expect(reviewAttemptPost).toEqual(expect.any(Function));
     expect(wikiPagesGet).toEqual(expect.any(Function));
   });
 
@@ -173,6 +178,8 @@ describe("Next app route adapter", () => {
     expect(teachbackRuntime).toBe("nodejs");
     expect(applicationTaskRuntime).toBe("nodejs");
     expect(applicationGradeRuntime).toBe("nodejs");
+    expect(reviewDueRuntime).toBe("nodejs");
+    expect(reviewAttemptRuntime).toBe("nodejs");
     expect(wikiPagesRuntime).toBe("nodejs");
   });
 
@@ -204,6 +211,18 @@ describe("Next app route adapter", () => {
         itemId: applicationTaskBody.data.result.itemId,
         response:
           "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+      })
+    );
+    const reviewDueResponse = await reviewDueGet(
+      new Request("https://example.test/api/review/due?target=2026-06-14", {
+        headers: { authorization: "Bearer env-secret" }
+      })
+    );
+    const reviewAttemptResponse = await reviewAttemptPost(
+      jsonRequest("https://example.test/api/review/attempt", {
+        conceptSlug: "review-topic",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
       })
     );
 
@@ -245,10 +264,12 @@ describe("Next app route adapter", () => {
         })
       ),
       applicationTaskResponse,
-      applicationGradeResponse
+      applicationGradeResponse,
+      reviewDueResponse,
+      reviewAttemptResponse
     ];
 
-    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200, 200]);
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 200, 200]);
     await expectResponseRouteIds(responses, [
       "ingest.run",
       "plan.today",
@@ -257,7 +278,9 @@ describe("Next app route adapter", () => {
       "quiz.grade",
       "teachback.submit",
       "application.task.create",
-      "application.grade"
+      "application.grade",
+      "review.due",
+      "review.attempt"
     ]);
   });
 
@@ -317,7 +340,8 @@ describe("Next app route adapter", () => {
         handler: applicationTaskPost,
         url: "https://example.test/api/application/task"
       },
-      { routeId: "application.grade", handler: applicationGradePost, url: "https://example.test/api/application/grade" }
+      { routeId: "application.grade", handler: applicationGradePost, url: "https://example.test/api/application/grade" },
+      { routeId: "review.attempt", handler: reviewAttemptPost, url: "https://example.test/api/review/attempt" }
     ] as const;
 
     for (const route of mutationRoutes) {
@@ -562,6 +586,16 @@ function seedAuthenticatedRouteData(dbPath: string): void {
       markdown: "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback.",
       citationIds: [applicationChunk.id],
       visibility: "private"
+    });
+    const reviewConcept = createConcept(db, {
+      slug: "review-topic",
+      name: "Review Topic",
+      status: "generated"
+    });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: reviewConcept.id,
+      fsrsState: { reviewCount: 0 },
+      dueAt: "2026-06-14T00:00:00.000Z"
     });
   } finally {
     db.close();

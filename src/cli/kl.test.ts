@@ -22,6 +22,7 @@ import {
   type KlAgentLiveSmokeDryRunCommandResult,
   type KlAgentPreflightDryRunCommandResult,
   type KlAgentScheduleDryRunCommandResult,
+  type KlAgentScheduleLiveCommandResult,
   type KlCommandResult,
   type KlPersistentQuizCommandResult,
   type KlPersistentTeachbackCommandResult
@@ -1103,13 +1104,253 @@ describe("kl CLI handler", () => {
     });
   });
 
-  test("agent-schedule command validates dry-run mode and schedule inputs", async () => {
+  test("agent-schedule live mode executes the existing live agent-day path when due", async () => {
+    const stdout = createCapture();
+    const calls: FetchCall[] = [];
+    const result = (await handleKlCommand(
+      [
+        "agent-schedule",
+        "--live",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--knowledge-loop-url",
+        "http://knowledge.local",
+        "--compass-health-url",
+        "http://compass.local",
+        "--board",
+        "Holly Daily",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks",
+        "--multica-add-comment-url",
+        "http://multica.local/api/comments"
+      ],
+      {
+        stdout: stdout.sink,
+        env: {
+          KL_AGENT_READ_BEARER_TOKEN: "fallback-read-secret",
+          KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN: "knowledge-read-secret",
+          KL_AGENT_COMPASS_HEALTH_BEARER_TOKEN: "compass-read-secret",
+          KL_MULTICA_BEARER_TOKEN: "board-secret"
+        },
+        async fetch(input, init) {
+          calls.push({ input, init });
+          const url = String(input);
+          if (url.startsWith("http://multica.local/")) {
+            return jsonResponse({
+              id: `item-${calls.filter((call) => String(call.input).startsWith("http://multica.local/")).length}`,
+              url: `${url}/published`
+            });
+          }
+
+          return jsonResponse(successfulApiBodyForUrl(url));
+        }
+      }
+    )) as KlAgentScheduleLiveCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-schedule",
+      mode: "live",
+      result: {
+        status: "completed",
+        schedule: {
+          timezone: "Asia/Shanghai",
+          dailyAt: "07:30",
+          now: "2026-06-14T07:30:00+08:00",
+          due: true,
+          date: "2026-06-14",
+          window: {
+            startsAt: "2026-06-14T07:30:00+08:00",
+            endsBefore: "2026-06-15T07:30:00+08:00"
+          }
+        },
+        dayRunReport: {
+          mode: "live",
+          date: "2026-06-14",
+          multicaBoard: "Holly Daily",
+          status: "completed",
+          totals: {
+            reads: 5,
+            publishedActions: 4,
+            blockers: 0,
+            publishFailures: 0
+          }
+        }
+      }
+    });
+    if (!("dayRunReport" in result.result)) {
+      throw new Error("Expected due schedule live result to include a day run report.");
+    }
+    expect(result.result.dayRunReport.publishedActions.map((publish) => publish.action.title)).toEqual([
+      "Librarian ingest report for 2026-06-14",
+      "Scholar study plan for 2026-06-14",
+      "Nutrition plan for 2026-06-14",
+      "Scholar mastery report for 2026-06-14"
+    ]);
+    expect(calls.map((call) => String(call.input))).toEqual([
+      "http://knowledge.local/api/ingest/run?adapter=holly-vault",
+      "http://multica.local/api/comments",
+      "http://knowledge.local/api/plan/today",
+      "http://multica.local/api/tasks",
+      "http://compass.local/api/meal-plan/today?date=2026-06-14",
+      "http://compass.local/api/meal-engine/procurement",
+      "http://multica.local/api/tasks",
+      "http://knowledge.local/api/mastery/summary",
+      "http://multica.local/api/comments"
+    ]);
+    expect(calls.map(authorizationHeader)).toEqual([
+      "Bearer knowledge-read-secret",
+      "Bearer board-secret",
+      "Bearer knowledge-read-secret",
+      "Bearer board-secret",
+      "Bearer compass-read-secret",
+      "Bearer compass-read-secret",
+      "Bearer board-secret",
+      "Bearer knowledge-read-secret",
+      "Bearer board-secret"
+    ]);
+    for (const secret of ["knowledge-read-secret", "compass-read-secret", "fallback-read-secret", "board-secret"]) {
+      expect(stdout.text()).not.toContain(secret);
+    }
+  });
+
+  test("agent-schedule live mode skips without fetching when not due", async () => {
+    const stdout = createCapture();
+    const calls: FetchCall[] = [];
+    const result = (await handleKlCommand(
+      [
+        "agent-schedule",
+        "--live",
+        "--now",
+        "2026-06-14T07:29:59+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--knowledge-loop-url",
+        "http://knowledge.local",
+        "--compass-health-url",
+        "http://compass.local",
+        "--board",
+        "Holly Daily"
+      ],
+      {
+        stdout: stdout.sink,
+        async fetch(input, init) {
+          calls.push({ input, init });
+          throw new Error("schedule live not-due path must not fetch");
+        }
+      }
+    )) as KlAgentScheduleLiveCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "agent-schedule",
+      mode: "live",
+      result: {
+        status: "skipped",
+        reason: "not_due",
+        schedule: {
+          timezone: "Asia/Shanghai",
+          dailyAt: "07:30",
+          now: "2026-06-14T07:29:59+08:00",
+          due: false,
+          date: "2026-06-14",
+          window: {
+            startsAt: "2026-06-14T07:30:00+08:00",
+            endsBefore: "2026-06-15T07:30:00+08:00"
+          }
+        }
+      }
+    });
+    expect("dayRunReport" in result.result).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  test("agent-schedule command validates exactly one mode, live endpoints, and schedule inputs", async () => {
     await expect(handleKlCommand(["agent-schedule", "--now", "2026-06-14T07:30:00+08:00"])).rejects.toThrow(
-      /supports only --dry-run/
+      /requires exactly one of --dry-run or --live/
     );
-    await expect(handleKlCommand(["agent-schedule", "--live", "--now", "2026-06-14T07:30:00+08:00"])).rejects.toThrow(
-      /Unknown option for agent-schedule: --live/
-    );
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--dry-run",
+        "--live",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30"
+      ])
+    ).rejects.toThrow(/requires exactly one of --dry-run or --live/);
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--live",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30"
+      ])
+    ).rejects.toThrow(/requires exactly one --multica-create-task-url/);
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--live",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks"
+      ])
+    ).rejects.toThrow(/requires exactly one --multica-add-comment-url/);
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--live",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks",
+        "--multica-add-comment-url",
+        "http://multica.local/api/comments",
+        "--multica-add-comment-url",
+        "http://multica.local/api/comments/2"
+      ])
+    ).rejects.toThrow(/requires exactly one --multica-add-comment-url/);
+    await expect(
+      handleKlCommand([
+        "agent-schedule",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks",
+        "--multica-add-comment-url",
+        "http://multica.local/api/comments"
+      ])
+    ).resolves.toMatchObject({
+      command: "agent-schedule",
+      mode: "dry-run"
+    });
     await expect(
       handleKlCommand([
         "agent-schedule",

@@ -202,7 +202,27 @@ export interface KlAgentScheduleDryRunCommandResult {
   result: AgentScheduleDryRunReport;
 }
 
-export type KlAgentScheduleCommandResult = KlAgentScheduleDryRunCommandResult;
+export interface KlAgentScheduleLiveSkippedResult {
+  readonly status: "skipped";
+  readonly reason: "not_due";
+  readonly schedule: AgentScheduleTiming;
+}
+
+export interface KlAgentScheduleLiveExecutedResult {
+  readonly status: AgentDayRunReport["status"];
+  readonly schedule: AgentScheduleTiming;
+  readonly dayRunReport: AgentDayRunReport;
+}
+
+export type KlAgentScheduleLiveResult = KlAgentScheduleLiveSkippedResult | KlAgentScheduleLiveExecutedResult;
+
+export interface KlAgentScheduleLiveCommandResult {
+  command: "agent-schedule";
+  mode: "live";
+  result: KlAgentScheduleLiveResult;
+}
+
+export type KlAgentScheduleCommandResult = KlAgentScheduleDryRunCommandResult | KlAgentScheduleLiveCommandResult;
 
 export interface KlAgentLiveSmokeDryRunResult {
   readonly manifestPath: string;
@@ -386,7 +406,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   if (command === "agent-schedule") {
-    return runAgentScheduleCommand(args);
+    return runAgentScheduleCommand(args, io);
   }
 
   if (command === "agent-live-smoke") {
@@ -709,16 +729,32 @@ async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Pro
     };
   }
 
+  const result = await executeAgentDayLiveFromCli(plan, options, "agent-day", io);
+
+  return {
+    command: "agent-day",
+    mode: "live",
+    result
+  };
+}
+
+async function executeAgentDayLiveFromCli(
+  plan: AgentDayDryRunPlan,
+  options: Map<string, string[]>,
+  command: "agent-day" | "agent-schedule",
+  io: KlHandlerIO
+): Promise<AgentDayRunReport> {
   const env = io.env ?? process.env;
   const createTaskEndpointUrl = parseHttpEndpointOption(
-    requireOne(options, "--multica-create-task-url", "agent-day"),
+    requireOne(options, "--multica-create-task-url", command),
     "--multica-create-task-url"
   );
   const addCommentEndpointUrl = parseHttpEndpointOption(
-    requireOne(options, "--multica-add-comment-url", "agent-day"),
+    requireOne(options, "--multica-add-comment-url", command),
     "--multica-add-comment-url"
   );
-  const result = await executeAgentDay(plan, "live", {
+
+  return executeAgentDay(plan, "live", {
     readClient: createFetchAgentReadClient({
       fetch: io.fetch ?? globalThis.fetch,
       bearerToken: optionalEnv(env, "KL_AGENT_READ_BEARER_TOKEN"),
@@ -732,18 +768,15 @@ async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Pro
       addCommentEndpointUrl
     })
   });
-
-  return {
-    command: "agent-day",
-    mode: "live",
-    result
-  };
 }
 
-function runAgentScheduleCommand(args: readonly string[]): KlAgentScheduleCommandResult {
-  const { dryRun, options } = parseAgentScheduleOptions(args);
-  if (!dryRun) {
-    throw new UsageError("Command agent-schedule supports only --dry-run.");
+async function runAgentScheduleCommand(
+  args: readonly string[],
+  io: KlHandlerIO
+): Promise<KlAgentScheduleCommandResult> {
+  const { dryRun, live, options } = parseAgentScheduleOptions(args);
+  if (dryRun === live) {
+    throw new UsageError("Command agent-schedule requires exactly one of --dry-run or --live.");
   }
 
   const timing = createAgentScheduleTiming({
@@ -761,14 +794,40 @@ function runAgentScheduleCommand(args: readonly string[]): KlAgentScheduleComman
     })
   );
 
+  if (dryRun) {
+    return {
+      command: "agent-schedule",
+      mode: "dry-run",
+      result: createAgentScheduleReport({
+        timing,
+        plan,
+        argvOptions
+      })
+    };
+  }
+
+  if (!timing.due) {
+    return {
+      command: "agent-schedule",
+      mode: "live",
+      result: {
+        status: "skipped",
+        reason: "not_due",
+        schedule: timing
+      }
+    };
+  }
+
+  const dayRunReport = await executeAgentDayLiveFromCli(plan, options, "agent-schedule", io);
+
   return {
     command: "agent-schedule",
-    mode: "dry-run",
-    result: createAgentScheduleReport({
-      timing,
-      plan,
-      argvOptions
-    })
+    mode: "live",
+    result: {
+      status: dayRunReport.status,
+      schedule: timing,
+      dayRunReport
+    }
   };
 }
 
@@ -1126,10 +1185,15 @@ function parseAgentDayOptions(args: readonly string[]): {
   );
 }
 
-function parseAgentScheduleOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
+function parseAgentScheduleOptions(args: readonly string[]): {
+  dryRun: boolean;
+  live: boolean;
+  options: Map<string, string[]>;
+} {
   return parseFlaggedOptions(
     args,
     new Set([
+      "--live",
       "--now",
       "--timezone",
       "--daily-at",
@@ -1138,7 +1202,9 @@ function parseAgentScheduleOptions(args: readonly string[]): { dryRun: boolean; 
       "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
-      "--config"
+      "--config",
+      "--multica-create-task-url",
+      "--multica-add-comment-url"
     ]),
     "agent-schedule"
   );

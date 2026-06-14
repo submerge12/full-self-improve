@@ -83,6 +83,34 @@ npm run kl -- agent-schedule --dry-run `
 
 This prints whether the daily `agent-day` run is due, the local board-day window, the exact dry-run `agent-day` argv the scheduler would invoke, and the embedded dry-run day plan. It does not start a timer, call Multica, call compass-health, or prove the M2 two-day hands-free requirement.
 
+## Scheduler Live Single-Shot Trigger
+
+`agent-schedule --live` is a single invocation entry point that an external scheduler can call. It is not a daemon, does not install Windows Task Scheduler or cron, and does not make the M2 hands-free proof by itself.
+
+Use the same bearer-token environment variables as `agent-day --live`:
+
+```powershell
+$env:KL_AGENT_READ_BEARER_TOKEN = "<fallback source read token if required>"
+$env:KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN = "<knowledge-loop read token if different>"
+$env:KL_AGENT_COMPASS_HEALTH_BEARER_TOKEN = "<compass-health read token if different>"
+$env:KL_MULTICA_BEARER_TOKEN = "<local Multica token if required>"
+
+npm run kl -- agent-schedule --live `
+  --now 2026-06-14T07:30:00+08:00 `
+  --timezone Asia/Shanghai `
+  --daily-at 07:30 `
+  --config config/agents.example.json `
+  --knowledge-loop-url http://127.0.0.1:3000 `
+  --compass-health-url http://127.0.0.1:8000 `
+  --board daily-plan `
+  --multica-create-task-url http://127.0.0.1:8080/api/issues `
+  --multica-add-comment-url http://127.0.0.1:8080/api/issues/<issue-id>/comments
+```
+
+When the computed schedule timing is `due: false`, the command returns a `live` result with `status: "skipped"` and `reason: "not_due"` plus the schedule window evidence. That skipped path must not fetch Knowledge-Loop, compass-health, or Multica, and it does not require live Multica endpoint flags.
+
+When the computed timing is `due: true`, the command requires explicit `--multica-create-task-url` and `--multica-add-comment-url` values and then runs the same live execution path as `agent-day --live`. The result embeds the schedule timing and the live day-run report. This proves only that the single trigger can produce a day run at the scheduled time. Real M2 evidence still requires Windows Task Scheduler or cron to invoke this command hands-free, capture two consecutive board days, and preserve the live board evidence.
+
 ## Offline Live-Smoke Manifest
 
 Use `config/multica/live-smoke.example.json` as the pre-live board-day contract. It defines the two consecutive board days and the required evidence for each M2 item: Librarian ingest comment, Scholar morning study task, Nutritionist meal task, and Scholar evening mastery comment.

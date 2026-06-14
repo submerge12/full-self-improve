@@ -1060,6 +1060,7 @@ function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options:
       "--date",
       "--knowledge-loop-url",
       "--compass-health-url",
+      "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
       "--config"
@@ -1080,6 +1081,7 @@ function parseAgentDayOptions(args: readonly string[]): {
       "--date",
       "--knowledge-loop-url",
       "--compass-health-url",
+      "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
       "--config",
@@ -1099,6 +1101,7 @@ function parseAgentScheduleOptions(args: readonly string[]): { dryRun: boolean; 
       "--daily-at",
       "--knowledge-loop-url",
       "--compass-health-url",
+      "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
       "--config"
@@ -1115,6 +1118,7 @@ function parseAgentLiveSmokeOptions(args: readonly string[]): { dryRun: boolean;
       "--date",
       "--knowledge-loop-url",
       "--compass-health-url",
+      "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
       "--config"
@@ -1133,6 +1137,7 @@ function parseAgentPreflightOptions(args: readonly string[]): { dryRun: boolean;
       "--manifest",
       "--knowledge-loop-url",
       "--compass-health-url",
+      "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
       "--config"
@@ -1160,6 +1165,7 @@ function parseAgentFailureSmokeOptions(args: readonly string[]): { dryRun: boole
       "--date",
       "--knowledge-loop-url",
       "--compass-health-url",
+      "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
       "--config"
@@ -1335,12 +1341,14 @@ function createPreflightChecks(input: {
 function agentDryRunOverrides(options: Map<string, string[]>, command: string): AgentDryRunDefaults {
   const knowledgeLoopBaseUrl = optionalOne(options, "--knowledge-loop-url", command);
   const compassHealthBaseUrl = optionalOne(options, "--compass-health-url", command);
+  const nutritionistMealReadUrlTemplate = optionalOne(options, "--nutritionist-meal-read-url-template", command);
   const adapterId = optionalOne(options, "--adapter", command);
   const multicaBoard = optionalOne(options, "--board", command);
 
   return {
     ...(knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl }),
     ...(compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl }),
+    ...(nutritionistMealReadUrlTemplate === undefined ? {} : { nutritionistMealReadUrlTemplate }),
     ...(adapterId === undefined ? {} : { adapterId }),
     ...(multicaBoard === undefined ? {} : { multicaBoard })
   };
@@ -1358,6 +1366,9 @@ function agentScheduleArgvOptions(options: Map<string, string[]>, command: strin
     ...(dryRunOverrides.compassHealthBaseUrl === undefined
       ? {}
       : { compassHealthBaseUrl: dryRunOverrides.compassHealthBaseUrl }),
+    ...(dryRunOverrides.nutritionistMealReadUrlTemplate === undefined
+      ? {}
+      : { nutritionistMealReadUrlTemplate: dryRunOverrides.nutritionistMealReadUrlTemplate }),
     ...(dryRunOverrides.adapterId === undefined ? {} : { adapterId: dryRunOverrides.adapterId }),
     ...(dryRunOverrides.multicaBoard === undefined ? {} : { multicaBoard: dryRunOverrides.multicaBoard })
   };

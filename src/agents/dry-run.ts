@@ -12,6 +12,7 @@ export interface AgentDryRunInput {
   readonly date: string;
   readonly knowledgeLoopBaseUrl?: string;
   readonly compassHealthBaseUrl?: string;
+  readonly nutritionistMealReadUrlTemplate?: string;
   readonly adapterId?: string;
   readonly multicaBoard?: string;
 }
@@ -20,6 +21,7 @@ export interface AgentDayDryRunInput {
   readonly date: string;
   readonly knowledgeLoopBaseUrl?: string;
   readonly compassHealthBaseUrl?: string;
+  readonly nutritionistMealReadUrlTemplate?: string;
   readonly adapterId?: string;
   readonly multicaBoard?: string;
 }
@@ -70,6 +72,7 @@ export interface AgentDayDryRunPlan {
 
 const DEFAULT_KNOWLEDGE_LOOP_BASE_URL = "http://127.0.0.1:3000";
 const DEFAULT_COMPASS_HEALTH_BASE_URL = "http://127.0.0.1:8000";
+const DEFAULT_NUTRITIONIST_MEAL_READ_URL_TEMPLATE = "/api/meal-plan/today?date={date}";
 const DEFAULT_ADAPTER_ID = "holly-vault";
 const DEFAULT_MULTICA_BOARD = "daily-plan";
 
@@ -107,6 +110,9 @@ export function createAgentDayDryRunPlan(input: AgentDayDryRunInput): AgentDayDr
     date: input.date,
     ...(input.knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl: input.knowledgeLoopBaseUrl }),
     ...(input.compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl: input.compassHealthBaseUrl }),
+    ...(input.nutritionistMealReadUrlTemplate === undefined
+      ? {}
+      : { nutritionistMealReadUrlTemplate: input.nutritionistMealReadUrlTemplate }),
     ...(input.adapterId === undefined ? {} : { adapterId: input.adapterId }),
     multicaBoard
   };
@@ -196,10 +202,47 @@ function externalReadsFor(input: AgentDryRunInput, phase: AgentPhase): AgentEndp
   return [
     {
       method: "GET",
-      url: `${compassHealthBaseUrl}/api/meal-plan/today?date=${encodeURIComponent(input.date)}`,
+      url: nutritionistMealReadUrlFor({
+        compassHealthBaseUrl,
+        template: input.nutritionistMealReadUrlTemplate ?? DEFAULT_NUTRITIONIST_MEAL_READ_URL_TEMPLATE,
+        date: input.date
+      }),
       purpose: "Fetch today's meals and shopping list through the existing compass-health API."
     }
   ];
+}
+
+function nutritionistMealReadUrlFor(input: {
+  readonly compassHealthBaseUrl: string;
+  readonly template: string;
+  readonly date: string;
+}): string {
+  if (!input.template.includes("{date}")) {
+    throw new Error("nutritionistMealReadUrlTemplate must include {date}.");
+  }
+  if (input.template.includes("\\")) {
+    throw new Error("nutritionistMealReadUrlTemplate must be an http(s) URL or a root-relative URL path.");
+  }
+
+  const resolved = input.template.replaceAll("{date}", encodeURIComponent(input.date));
+  if (resolved.startsWith("/")) {
+    if (resolved.startsWith("//")) {
+      throw new Error("nutritionistMealReadUrlTemplate must be an http(s) URL or a root-relative URL path.");
+    }
+
+    return new URL(resolved, `${input.compassHealthBaseUrl}/`).toString();
+  }
+
+  try {
+    const url = new URL(resolved);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      return url.toString();
+    }
+  } catch {
+    // Fall through to the uniform error below.
+  }
+
+  throw new Error("nutritionistMealReadUrlTemplate must be an http(s) URL or a root-relative URL path.");
 }
 
 function intendedActionsFor(

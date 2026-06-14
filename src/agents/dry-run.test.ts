@@ -99,6 +99,36 @@ describe("agent dry-run profiles", () => {
     });
   });
 
+  test("Nutritionist dry-run supports a configurable meal read URL template", () => {
+    const plan = createAgentDryRunPlan({
+      role: "nutritionist",
+      date: "2026-06-13",
+      compassHealthBaseUrl: "http://compass.local/",
+      nutritionistMealReadUrlTemplate: "/api/meal-plan/week?date={date}"
+    });
+
+    expect(plan.externalReads).toEqual([
+      expect.objectContaining({
+        method: "GET",
+        url: "http://compass.local/api/meal-plan/week?date=2026-06-13"
+      })
+    ]);
+    expect(plan.intendedActions[0]?.sourceEndpoints).toEqual([
+      "GET http://compass.local/api/meal-plan/week?date=2026-06-13"
+    ]);
+  });
+
+  test("Nutritionist dry-run rejects URL templates with backslash host escapes", () => {
+    expect(() =>
+      createAgentDryRunPlan({
+        role: "nutritionist",
+        date: "2026-06-13",
+        compassHealthBaseUrl: "http://compass.local/",
+        nutritionistMealReadUrlTemplate: "/\\evil.example/api/meal-plan/week?date={date}"
+      })
+    ).toThrow(/nutritionistMealReadUrlTemplate must be an http\(s\) URL or a root-relative URL path/);
+  });
+
   test("agent dry-run rejects invalid roles, phases, combinations, and dates", () => {
     expect(() => parseAgentRole("coach")).toThrow(/Invalid agent role/);
     expect(() => parseAgentPhase("nightly")).toThrow(/Invalid agent phase/);

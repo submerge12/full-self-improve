@@ -53,6 +53,58 @@ describe("kl agent config loading", () => {
     ]);
   });
 
+  test("agent-day dry-run reads and overrides the Nutritionist meal read URL template", async () => {
+    const previousCwd = process.cwd();
+    const root = mkdtempSync(path.join(tmpdir(), "kl-agent-cli-meal-url-root-"));
+    mkdirSync(path.join(root, "config"));
+    writeFileSync(
+      path.join(root, "config", "agents.json"),
+      JSON.stringify({
+        knowledgeLoopBaseUrl: "http://127.0.0.1:3124",
+        compassHealthBaseUrl: "http://127.0.0.1:8000",
+        nutritionistMealReadUrlTemplate: "/api/meal-plan/week?date={date}",
+        roles: {
+          nutritionist: {
+            dryRun: true,
+            phases: ["daily-meals"]
+          }
+        }
+      }),
+      "utf8"
+    );
+
+    try {
+      process.chdir(root);
+      const configDefault = (await handleKlCommand([
+        "agent-day",
+        "--dry-run",
+        "--config",
+        "config/agents.json",
+        "--date",
+        "2026-06-14"
+      ])) as KlAgentDayDryRunCommandResult;
+      const cliOverride = (await handleKlCommand([
+        "agent-day",
+        "--dry-run",
+        "--config",
+        "config/agents.json",
+        "--date",
+        "2026-06-14",
+        "--nutritionist-meal-read-url-template",
+        "http://meals.local/read?day={date}"
+      ])) as KlAgentDayDryRunCommandResult;
+
+      expect(configDefault.result.externalReads.map((read) => `${read.method} ${read.url}`)).toContain(
+        "GET http://127.0.0.1:8000/api/meal-plan/week?date=2026-06-14"
+      );
+      expect(cliOverride.result.externalReads.map((read) => `${read.method} ${read.url}`)).toContain(
+        "GET http://meals.local/read?day=2026-06-14"
+      );
+    } finally {
+      process.chdir(previousCwd);
+    }
+  });
+
   test("agent commands reject duplicate or missing config options", async () => {
     await expect(
       handleKlCommand([

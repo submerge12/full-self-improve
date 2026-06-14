@@ -22,6 +22,7 @@ export interface AgentScheduleArgvOptions {
   readonly configPath?: string;
   readonly knowledgeLoopBaseUrl?: string;
   readonly compassHealthBaseUrl?: string;
+  readonly nutritionistMealReadUrlTemplate?: string;
   readonly adapterId?: string;
   readonly multicaBoard?: string;
 }
@@ -90,6 +91,7 @@ function agentDayDryRunArgv(date: string, options: AgentScheduleArgvOptions | un
   pushOptional(argv, "--config", options?.configPath);
   pushOptional(argv, "--knowledge-loop-url", options?.knowledgeLoopBaseUrl);
   pushOptional(argv, "--compass-health-url", options?.compassHealthBaseUrl);
+  pushOptional(argv, "--nutritionist-meal-read-url-template", options?.nutritionistMealReadUrlTemplate);
   pushOptional(argv, "--adapter", options?.adapterId);
   pushOptional(argv, "--board", options?.multicaBoard);
 

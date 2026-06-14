@@ -6,6 +6,7 @@ import type { AgentDayDryRunInput, AgentDryRunInput, AgentPhase, AgentRole } fro
 export interface AgentRuntimeConfig {
   readonly knowledgeLoopBaseUrl?: string;
   readonly compassHealthBaseUrl?: string;
+  readonly nutritionistMealReadUrlTemplate?: string;
   readonly adapterId?: string;
   readonly multicaBoard?: string;
   readonly roles: Partial<Record<AgentRole, AgentRoleConfig>>;
@@ -18,12 +19,20 @@ export interface AgentRoleConfig {
 
 export type AgentDryRunDefaults = Pick<
   AgentDryRunInput,
-  "knowledgeLoopBaseUrl" | "compassHealthBaseUrl" | "adapterId" | "multicaBoard"
+  "knowledgeLoopBaseUrl" | "compassHealthBaseUrl" | "nutritionistMealReadUrlTemplate" | "adapterId" | "multicaBoard"
 >;
 
 const URL_FIELDS = new Set(["knowledgeLoopBaseUrl", "compassHealthBaseUrl"]);
 const FREE_TEXT_FIELDS = new Set(["adapterId", "multicaBoard"]);
-const TOP_LEVEL_FIELDS = new Set(["knowledgeLoopBaseUrl", "compassHealthBaseUrl", "adapterId", "multicaBoard", "roles"]);
+const URL_TEMPLATE_FIELDS = new Set(["nutritionistMealReadUrlTemplate"]);
+const TOP_LEVEL_FIELDS = new Set([
+  "knowledgeLoopBaseUrl",
+  "compassHealthBaseUrl",
+  "nutritionistMealReadUrlTemplate",
+  "adapterId",
+  "multicaBoard",
+  "roles"
+]);
 const ROLE_FIELDS = new Set(["dryRun", "phases"]);
 
 export function loadAgentRuntimeConfig(configPath: string, projectRoot = process.cwd()): AgentRuntimeConfig {
@@ -53,6 +62,14 @@ export function validateAgentRuntimeConfig(value: unknown): AgentRuntimeConfig {
     }
   }
 
+  for (const field of URL_TEMPLATE_FIELDS) {
+    const fieldValue = config[field];
+    if (fieldValue !== undefined) {
+      assertString(fieldValue, field);
+      assertUrlTemplate(fieldValue, field);
+    }
+  }
+
   for (const field of FREE_TEXT_FIELDS) {
     const fieldValue = config[field];
     if (fieldValue !== undefined) {
@@ -65,6 +82,9 @@ export function validateAgentRuntimeConfig(value: unknown): AgentRuntimeConfig {
   return {
     ...(config.knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl: config.knowledgeLoopBaseUrl }),
     ...(config.compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl: config.compassHealthBaseUrl }),
+    ...(config.nutritionistMealReadUrlTemplate === undefined
+      ? {}
+      : { nutritionistMealReadUrlTemplate: config.nutritionistMealReadUrlTemplate }),
     ...(config.adapterId === undefined ? {} : { adapterId: config.adapterId }),
     ...(config.multicaBoard === undefined ? {} : { multicaBoard: config.multicaBoard }),
     roles
@@ -79,6 +99,9 @@ export function resolveAgentDryRunDefaults(config: AgentRuntimeConfig | undefine
   return validateAgentDryRunDefaults({
     ...(config.knowledgeLoopBaseUrl === undefined ? {} : { knowledgeLoopBaseUrl: config.knowledgeLoopBaseUrl }),
     ...(config.compassHealthBaseUrl === undefined ? {} : { compassHealthBaseUrl: config.compassHealthBaseUrl }),
+    ...(config.nutritionistMealReadUrlTemplate === undefined
+      ? {}
+      : { nutritionistMealReadUrlTemplate: config.nutritionistMealReadUrlTemplate }),
     ...(config.adapterId === undefined ? {} : { adapterId: config.adapterId }),
     ...(config.multicaBoard === undefined ? {} : { multicaBoard: config.multicaBoard })
   });
@@ -91,6 +114,15 @@ export function validateAgentDryRunDefaults(defaults: AgentDryRunDefaults): Agen
       assertString(fieldValue, field);
       assertNoSecretLikeValue(fieldValue, field);
       assertHttpUrl(fieldValue, field);
+    }
+  }
+
+  for (const field of URL_TEMPLATE_FIELDS) {
+    const fieldValue = defaults[field as keyof AgentDryRunDefaults];
+    if (fieldValue !== undefined) {
+      assertString(fieldValue, field);
+      assertNoSecretLikeValue(fieldValue, field);
+      assertUrlTemplate(fieldValue, field);
     }
   }
 
@@ -331,6 +363,40 @@ function assertHttpUrl(value: string, field: string): void {
   }
 
   throw new Error(`${field} must be an http or https URL.`);
+}
+
+function assertUrlTemplate(value: string, field: string): void {
+  if (!value.includes("{date}")) {
+    throw new Error(`${field} must include {date}.`);
+  }
+  if (value.includes("\\")) {
+    throw new Error(`${field} must be an http(s) URL or a root-relative URL path.`);
+  }
+
+  const probeValue = value.replaceAll("{date}", "2026-06-14");
+  if (probeValue.startsWith("/")) {
+    if (!probeValue.startsWith("//")) {
+      try {
+        new URL(probeValue, "http://example.invalid");
+        return;
+      } catch {
+        // Fall through to the uniform error below.
+      }
+    }
+
+    throw new Error(`${field} must be an http(s) URL or a root-relative URL path.`);
+  }
+
+  try {
+    const url = new URL(probeValue);
+    if ((url.protocol === "http:" || url.protocol === "https:") && url.username.length === 0 && url.password.length === 0) {
+      return;
+    }
+  } catch {
+    // Fall through to the uniform error below.
+  }
+
+  throw new Error(`${field} must be an http(s) URL or a root-relative URL path.`);
 }
 
 function assertNotFilesystemLike(value: string, field: string): void {

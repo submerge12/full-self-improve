@@ -23,6 +23,19 @@ describe("agent runtime config", () => {
     expect(config.roles.scholar?.phases).toEqual(["morning-plan", "evening-mastery"]);
   });
 
+  test("accepts a Nutritionist meal read URL template as a dry-run default", () => {
+    const config = validateAgentRuntimeConfig({
+      compassHealthBaseUrl: "http://127.0.0.1:8000",
+      nutritionistMealReadUrlTemplate: "/api/meal-plan/week?date={date}",
+      roles: {}
+    });
+
+    expect(resolveAgentDryRunDefaults(config)).toEqual({
+      compassHealthBaseUrl: "http://127.0.0.1:8000",
+      nutritionistMealReadUrlTemplate: "/api/meal-plan/week?date={date}"
+    });
+  });
+
   test("rejects secret-like keys anywhere in agent config", () => {
     expect(() =>
       validateAgentRuntimeConfig({
@@ -67,6 +80,13 @@ describe("agent runtime config", () => {
         roles: {}
       })
     ).toThrow(/multicaBoard must not contain secret-like value/);
+
+    expect(() =>
+      validateAgentRuntimeConfig({
+        nutritionistMealReadUrlTemplate: "/api/meal-plan/week?date={date}&token=not-allowed",
+        roles: {}
+      })
+    ).toThrow(/nutritionistMealReadUrlTemplate must not contain secret-like value/);
   });
 
   test("rejects invalid service URLs and filesystem-shaped integration values", () => {
@@ -147,6 +167,27 @@ describe("agent runtime config", () => {
         roles: {}
       })
     ).toThrow(/multicaBoard must not look like a filesystem path/);
+
+    expect(() =>
+      validateAgentRuntimeConfig({
+        nutritionistMealReadUrlTemplate: "api/meal-plan/week?date={date}",
+        roles: {}
+      })
+    ).toThrow(/nutritionistMealReadUrlTemplate must be an http\(s\) URL or a root-relative URL path/);
+
+    expect(() =>
+      validateAgentRuntimeConfig({
+        nutritionistMealReadUrlTemplate: "/api/meal-plan/week",
+        roles: {}
+      })
+    ).toThrow(/nutritionistMealReadUrlTemplate must include \{date\}/);
+
+    expect(() =>
+      validateAgentRuntimeConfig({
+        nutritionistMealReadUrlTemplate: "/\\evil.example/api/meal-plan/week?date={date}",
+        roles: {}
+      })
+    ).toThrow(/nutritionistMealReadUrlTemplate must be an http\(s\) URL or a root-relative URL path/);
   });
 
   test("rejects unknown fields and live-write switches", () => {

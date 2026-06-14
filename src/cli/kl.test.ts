@@ -64,6 +64,18 @@ interface FetchCall {
   readonly init: RequestInit | undefined;
 }
 
+function authorizationHeader(call: FetchCall | undefined): string | undefined {
+  const headers = call?.init?.headers;
+  if (headers instanceof Headers) {
+    return headers.get("Authorization") ?? undefined;
+  }
+  if (Array.isArray(headers)) {
+    return headers.find(([name]) => name.toLowerCase() === "authorization")?.[1];
+  }
+
+  return headers?.Authorization ?? headers?.authorization;
+}
+
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   return new Response(JSON.stringify(body), {
     ...init,
@@ -605,7 +617,7 @@ describe("kl CLI handler", () => {
     ]);
   });
 
-  test("agent-day live mode manually runs the day sequence through injected HTTP clients", async () => {
+  test("agent-day live mode uses service-specific read bearers and board bearer", async () => {
     const stdout = createCapture();
     const calls: FetchCall[] = [];
     const result = (await handleKlCommand(
@@ -628,7 +640,9 @@ describe("kl CLI handler", () => {
       {
         stdout: stdout.sink,
         env: {
-          KL_AGENT_READ_BEARER_TOKEN: "read-secret",
+          KL_AGENT_READ_BEARER_TOKEN: "fallback-read-secret",
+          KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN: "knowledge-read-secret",
+          KL_AGENT_COMPASS_HEALTH_BEARER_TOKEN: "compass-read-secret",
           KL_MULTICA_BEARER_TOKEN: "board-secret"
         },
         async fetch(input, init) {
@@ -710,8 +724,170 @@ describe("kl CLI handler", () => {
       "http://knowledge.local/api/mastery/summary",
       "http://multica.local/api/comments"
     ]);
-    expect(calls[0]?.init?.headers).toMatchObject({ Authorization: "Bearer read-secret" });
-    expect(calls[1]?.init?.headers).toMatchObject({ Authorization: "Bearer board-secret" });
+    expect(calls.map(authorizationHeader)).toEqual([
+      "Bearer knowledge-read-secret",
+      "Bearer board-secret",
+      "Bearer knowledge-read-secret",
+      "Bearer board-secret",
+      "Bearer compass-read-secret",
+      "Bearer board-secret",
+      "Bearer knowledge-read-secret",
+      "Bearer board-secret"
+    ]);
+    for (const secret of ["knowledge-read-secret", "compass-read-secret", "fallback-read-secret", "board-secret"]) {
+      expect(stdout.text()).not.toContain(secret);
+    }
+  });
+
+  test("agent-day live mode falls back to the legacy read bearer when service bearers are unset", async () => {
+    const calls: FetchCall[] = [];
+    await handleKlCommand(
+      [
+        "agent-day",
+        "--live",
+        "--date",
+        "2026-06-13",
+        "--knowledge-loop-url",
+        "http://knowledge.local",
+        "--compass-health-url",
+        "http://compass.local",
+        "--multica-create-task-url",
+        "http://multica.local/api/tasks",
+        "--multica-add-comment-url",
+        "http://multica.local/api/comments"
+      ],
+      {
+        env: {
+          KL_AGENT_READ_BEARER_TOKEN: "legacy-read-secret",
+          KL_MULTICA_BEARER_TOKEN: "board-secret"
+        },
+        async fetch(input, init) {
+          calls.push({ input, init });
+          const url = String(input);
+          if (url.startsWith("http://multica.local/")) {
+            return jsonResponse({ id: `item-${calls.length}` });
+          }
+
+          return jsonResponse(successfulApiBodyForUrl(url));
+        }
+      }
+    );
+
+    expect(calls.map(authorizationHeader)).toEqual([
+      "Bearer legacy-read-secret",
+      "Bearer board-secret",
+      "Bearer legacy-read-secret",
+      "Bearer board-secret",
+      "Bearer legacy-read-secret",
+      "Bearer board-secret",
+      "Bearer legacy-read-secret",
+      "Bearer board-secret"
+    ]);
+  });
+
+  test("agent-day live mode rejects conflicting service read bearers on the same origin", async () => {
+    const calls: FetchCall[] = [];
+    const runCommand = () =>
+      handleKlCommand(
+        [
+          "agent-day",
+          "--live",
+          "--date",
+          "2026-06-13",
+          "--knowledge-loop-url",
+          "http://local.reverse-proxy",
+          "--compass-health-url",
+          "http://local.reverse-proxy",
+          "--multica-create-task-url",
+          "http://multica.local/api/tasks",
+          "--multica-add-comment-url",
+          "http://multica.local/api/comments"
+        ],
+        {
+          env: {
+            KL_AGENT_READ_BEARER_TOKEN: "legacy-read-secret",
+            KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN: "knowledge-read-secret",
+            KL_AGENT_COMPASS_HEALTH_BEARER_TOKEN: "compass-read-secret",
+            KL_MULTICA_BEARER_TOKEN: "board-secret"
+          },
+          async fetch(input, init) {
+            calls.push({ input, init });
+            return jsonResponse(successfulApiBodyForUrl(String(input)));
+          }
+        }
+      );
+
+    await expect(runCommand()).rejects.toThrow(/share origin .* but require different read bearer tokens/);
+    await expect(runCommand()).rejects.toThrow(expect.objectContaining({ message: expect.not.stringContaining("knowledge-read-secret") }));
+    await expect(runCommand()).rejects.toThrow(expect.objectContaining({ message: expect.not.stringContaining("compass-read-secret") }));
+    expect(calls).toEqual([]);
+  });
+
+  test("agent-day live mode rejects same-origin service bearer conflicts against fallback", async () => {
+    const calls: FetchCall[] = [];
+    await expect(
+      handleKlCommand(
+        [
+          "agent-day",
+          "--live",
+          "--date",
+          "2026-06-13",
+          "--knowledge-loop-url",
+          "http://local.reverse-proxy",
+          "--compass-health-url",
+          "http://local.reverse-proxy",
+          "--multica-create-task-url",
+          "http://multica.local/api/tasks",
+          "--multica-add-comment-url",
+          "http://multica.local/api/comments"
+        ],
+        {
+          env: {
+            KL_AGENT_READ_BEARER_TOKEN: "legacy-read-secret",
+            KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN: "knowledge-read-secret",
+            KL_MULTICA_BEARER_TOKEN: "board-secret"
+          },
+          async fetch(input, init) {
+            calls.push({ input, init });
+            return jsonResponse(successfulApiBodyForUrl(String(input)));
+          }
+        }
+      )
+    ).rejects.toThrow(/share origin .* but require different read bearer tokens/);
+    expect(calls).toEqual([]);
+  });
+
+  test("agent-day live mode rejects same-origin service bearer conflicts against no token", async () => {
+    const calls: FetchCall[] = [];
+    await expect(
+      handleKlCommand(
+        [
+          "agent-day",
+          "--live",
+          "--date",
+          "2026-06-13",
+          "--knowledge-loop-url",
+          "http://local.reverse-proxy",
+          "--compass-health-url",
+          "http://local.reverse-proxy",
+          "--multica-create-task-url",
+          "http://multica.local/api/tasks",
+          "--multica-add-comment-url",
+          "http://multica.local/api/comments"
+        ],
+        {
+          env: {
+            KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN: "knowledge-read-secret",
+            KL_MULTICA_BEARER_TOKEN: "board-secret"
+          },
+          async fetch(input, init) {
+            calls.push({ input, init });
+            return jsonResponse(successfulApiBodyForUrl(String(input)));
+          }
+        }
+      )
+    ).rejects.toThrow(/share origin .* but require different read bearer tokens/);
+    expect(calls).toEqual([]);
   });
 
   test("agent-day live mode is explicit and requires board publish endpoints", async () => {

@@ -6,6 +6,7 @@ export type AgentFetch = typeof fetch;
 export interface FetchAgentReadClientOptions {
   readonly fetch: AgentFetch;
   readonly bearerToken?: string;
+  readonly bearerTokensByOrigin?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface HttpBoardClientOptions {
@@ -82,14 +83,15 @@ async function readEndpoint(
   endpoint: AgentEndpointPlan,
   options: FetchAgentReadClientOptions
 ): Promise<AgentReadResult> {
-  const secrets = secretsFrom(options.bearerToken);
+  const bearerToken = bearerTokenForEndpoint(endpoint.url, options);
+  const secrets = readClientSecretsFrom(options);
   const context = `${endpoint.method} ${redactUrl(endpoint.url, secrets)}`;
   let response: Response;
 
   try {
     response = await options.fetch(endpoint.url, {
       method: endpoint.method,
-      headers: headersFor(options.bearerToken)
+      headers: headersFor(bearerToken)
     });
   } catch (error) {
     throw new AgentHttpError(
@@ -307,8 +309,35 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function secretsFrom(value: string | undefined): readonly string[] {
-  return value === undefined ? [] : [value];
+function bearerTokenForEndpoint(endpointUrl: string, options: FetchAgentReadClientOptions): string | undefined {
+  const origin = originFor(endpointUrl);
+  const originBearerTokens = options.bearerTokensByOrigin;
+  if (origin !== undefined && originBearerTokens !== undefined && hasOwnKey(originBearerTokens, origin)) {
+    const originBearerToken = originBearerTokens[origin];
+    return originBearerToken === undefined || originBearerToken.length === 0 ? undefined : originBearerToken;
+  }
+
+  return options.bearerToken;
+}
+
+function originFor(value: string): string | undefined {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function readClientSecretsFrom(options: FetchAgentReadClientOptions): readonly string[] {
+  return secretsFrom(options.bearerToken, ...Object.values(options.bearerTokensByOrigin ?? {}));
+}
+
+function secretsFrom(...values: readonly (string | undefined)[]): readonly string[] {
+  return values.filter((value): value is string => value !== undefined && value.length > 0);
+}
+
+function hasOwnKey(record: Readonly<Record<string, unknown>>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

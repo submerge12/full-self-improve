@@ -84,6 +84,85 @@ describe("agent HTTP clients", () => {
     expect(spy.calls[0]?.init).not.toHaveProperty("body");
   });
 
+  test("read client uses endpoint-origin bearer tokens before fallback bearer", async () => {
+    const spy = createSpyFetch([
+      jsonResponse({ service: "knowledge-loop" }),
+      jsonResponse({ service: "compass-health" }),
+      jsonResponse({ service: "fallback" })
+    ]);
+    const client = createFetchAgentReadClient({
+      fetch: spy.fetch,
+      bearerToken: "fallback-bearer",
+      bearerTokensByOrigin: {
+        "http://knowledge.local": "knowledge-bearer",
+        "https://compass.local:8443": "compass-bearer"
+      }
+    });
+
+    await client.read({
+      method: "GET",
+      url: "http://knowledge.local/api/plan/today",
+      purpose: "Fetch plan"
+    });
+    await client.read({
+      method: "GET",
+      url: "https://compass.local:8443/api/meal-plan/today?date=2026-06-13",
+      purpose: "Fetch meals"
+    });
+    await client.read({
+      method: "GET",
+      url: "http://other.local/api/status",
+      purpose: "Fetch fallback service"
+    });
+
+    expect(spy.calls.map((call) => call.init?.headers)).toEqual([
+      {
+        Accept: "application/json",
+        Authorization: "Bearer knowledge-bearer"
+      },
+      {
+        Accept: "application/json",
+        Authorization: "Bearer compass-bearer"
+      },
+      {
+        Accept: "application/json",
+        Authorization: "Bearer fallback-bearer"
+      }
+    ]);
+  });
+
+  test("read client honors explicit no-token origins before fallback bearer", async () => {
+    const spy = createSpyFetch([jsonResponse({ service: "public" }), jsonResponse({ service: "fallback" })]);
+    const client = createFetchAgentReadClient({
+      fetch: spy.fetch,
+      bearerToken: "fallback-bearer",
+      bearerTokensByOrigin: {
+        "http://public.local": undefined
+      }
+    });
+
+    await client.read({
+      method: "GET",
+      url: "http://public.local/api/status",
+      purpose: "Fetch public service"
+    });
+    await client.read({
+      method: "GET",
+      url: "http://other.local/api/status",
+      purpose: "Fetch fallback service"
+    });
+
+    expect(spy.calls.map((call) => call.init?.headers)).toEqual([
+      {
+        Accept: "application/json"
+      },
+      {
+        Accept: "application/json",
+        Authorization: "Bearer fallback-bearer"
+      }
+    ]);
+  });
+
   test("read client returns text bodies for non-json responses", async () => {
     const spy = createSpyFetch([
       new Response("plain mastery summary", {

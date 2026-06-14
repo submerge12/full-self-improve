@@ -711,7 +711,8 @@ async function runAgentDayCommand(args: readonly string[], io: KlHandlerIO): Pro
   const result = await executeAgentDay(plan, "live", {
     readClient: createFetchAgentReadClient({
       fetch: io.fetch ?? globalThis.fetch,
-      bearerToken: optionalEnv(env, "KL_AGENT_READ_BEARER_TOKEN")
+      bearerToken: optionalEnv(env, "KL_AGENT_READ_BEARER_TOKEN"),
+      bearerTokensByOrigin: serviceReadBearerTokensByOrigin(plan, env)
     }),
     boardClient: createHttpBoardClient({
       fetch: io.fetch ?? globalThis.fetch,
@@ -1421,6 +1422,55 @@ function optionalEnv(env: Readonly<Record<string, string | undefined>>, name: st
   const value = env[name];
 
   return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function serviceReadBearerTokensByOrigin(
+  plan: AgentDayDryRunPlan,
+  env: Readonly<Record<string, string | undefined>>
+): Readonly<Record<string, string | undefined>> {
+  const fallbackBearerToken = optionalEnv(env, "KL_AGENT_READ_BEARER_TOKEN");
+  const knowledgeLoopBearerToken = optionalEnv(env, "KL_AGENT_KNOWLEDGE_LOOP_BEARER_TOKEN");
+  const compassHealthBearerToken = optionalEnv(env, "KL_AGENT_COMPASS_HEALTH_BEARER_TOKEN");
+  const bearerTokensByOrigin: Record<string, string | undefined> = {};
+
+  for (const agentPlan of plan.sequence) {
+    const serviceBearerToken = agentPlan.role === "nutritionist" ? compassHealthBearerToken : knowledgeLoopBearerToken;
+    const effectiveBearerToken = serviceBearerToken ?? fallbackBearerToken;
+    for (const endpoint of agentPlan.externalReads) {
+      assignBearerTokenForEndpointOrigin(bearerTokensByOrigin, endpoint.url, effectiveBearerToken);
+    }
+  }
+
+  return bearerTokensByOrigin;
+}
+
+function assignBearerTokenForEndpointOrigin(
+  bearerTokensByOrigin: Record<string, string | undefined>,
+  endpointUrl: string,
+  bearerToken: string | undefined
+): void {
+  const origin = httpOriginFor(endpointUrl);
+  if (origin !== undefined) {
+    const hasExistingBearerToken = hasOwnKey(bearerTokensByOrigin, origin);
+    const existingBearerToken = bearerTokensByOrigin[origin];
+    if (hasExistingBearerToken && existingBearerToken !== bearerToken) {
+      throw new UsageError(`Agent read services share origin ${origin} but require different read bearer tokens.`);
+    }
+    bearerTokensByOrigin[origin] = bearerToken;
+  }
+}
+
+function httpOriginFor(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.origin : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasOwnKey(record: Readonly<Record<string, unknown>>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
 }
 
 function persistCommandTraceEvents(db: Database.Database, result: { traceEvents: readonly TraceEvent[] }): void {

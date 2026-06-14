@@ -226,7 +226,11 @@ type KlAgentPreflightCheckStatus = "passed" | "blocked";
 type KlAgentPreflightLiveProofStatus = "not_verified_offline";
 
 export interface KlAgentPreflightOfflineCheck {
-  readonly id: "scheduler_due" | "live_smoke_manifest_valid" | "manifest_starts_on_schedule_date";
+  readonly id:
+    | "scheduler_due"
+    | "live_smoke_manifest_valid"
+    | "manifest_starts_on_schedule_date"
+    | "board_publish_config_valid";
   readonly status: KlAgentPreflightCheckStatus;
   readonly detail: string;
 }
@@ -255,6 +259,11 @@ export interface KlAgentPreflightDryRunResult {
     readonly valid: boolean;
     readonly manifestEvidenceDays: readonly string[];
     readonly validation: LiveSmokeManifestValidationResult;
+  };
+  readonly boardConfig: {
+    readonly configPath: string;
+    readonly valid: boolean;
+    readonly validation: BoardPublishConfigValidationResult;
   };
 }
 
@@ -419,6 +428,7 @@ const DEFAULT_LIVE_SMOKE_NON_COMPLETION_NOTICE =
   "This offline validation does not execute Multica, install a scheduler, prove live board posting, or close M2.";
 const DEFAULT_PREFLIGHT_NON_COMPLETION_NOTICE =
   "This preflight is offline-only. It does not execute Multica, install a scheduler, prove live board posting, prove two hands-free days, or close M2.";
+const DEFAULT_BOARD_PUBLISH_CONFIG_PATH = "config/multica/board-publish.example.json";
 const DEFAULT_BOARD_CONFIG_NON_COMPLETION_NOTICE =
   "This board publish config validation is offline-only. It does not call Multica, prove the board contract, prove live posting, or close M2.";
 const DEFAULT_BOARD_EVIDENCE_NON_COMPLETION_NOTICE =
@@ -825,10 +835,14 @@ function runAgentPreflightCommand(args: readonly string[]): KlAgentPreflightComm
   const { manifest, relativePath } = loadLiveSmokeManifest(manifestPath);
   const validation = validateLiveSmokeManifest(manifest, plan);
   const manifestEvidenceDays = readManifestEvidenceDays(manifest);
+  const boardConfigPath =
+    optionalOne(options, "--board-config", "agent-preflight") ?? DEFAULT_BOARD_PUBLISH_CONFIG_PATH;
+  const boardConfig = loadBoardPublishConfigValidation(boardConfigPath);
   const offlineChecks = createPreflightChecks({
     timing,
     liveSmokeValid: validation.errors.length === 0,
-    manifestEvidenceDays
+    manifestEvidenceDays,
+    boardConfigValid: boardConfig.valid
   });
 
   return {
@@ -846,6 +860,11 @@ function runAgentPreflightCommand(args: readonly string[]): KlAgentPreflightComm
         valid: validation.errors.length === 0,
         manifestEvidenceDays,
         validation
+      },
+      boardConfig: {
+        configPath: boardConfig.relativePath,
+        valid: boardConfig.valid,
+        validation: boardConfig.validation
       }
     }
   };
@@ -858,6 +877,25 @@ function runAgentBoardConfigCommand(args: readonly string[]): KlAgentBoardConfig
   }
 
   const configPath = requireOne(options, "--config", "agent-board-config");
+  const boardConfig = loadBoardPublishConfigValidation(configPath);
+
+  return {
+    command: "agent-board-config",
+    mode: "dry-run",
+    result: {
+      configPath: boardConfig.relativePath,
+      valid: boardConfig.valid,
+      validation: boardConfig.validation,
+      nonCompletionNotice: DEFAULT_BOARD_CONFIG_NON_COMPLETION_NOTICE
+    }
+  };
+}
+
+function loadBoardPublishConfigValidation(configPath: string): {
+  readonly relativePath: string;
+  readonly valid: boolean;
+  readonly validation: BoardPublishConfigValidationResult;
+} {
   const { value, relativePath, errors } = loadCheckoutJsonForValidation(configPath, "Board publish config");
   const validation =
     errors.length === 0
@@ -868,14 +906,9 @@ function runAgentBoardConfigCommand(args: readonly string[]): KlAgentBoardConfig
         };
 
   return {
-    command: "agent-board-config",
-    mode: "dry-run",
-    result: {
-      configPath: relativePath,
-      valid: validation.errors.length === 0,
-      validation,
-      nonCompletionNotice: DEFAULT_BOARD_CONFIG_NON_COMPLETION_NOTICE
-    }
+    relativePath,
+    valid: validation.errors.length === 0,
+    validation
   };
 }
 
@@ -1141,6 +1174,7 @@ function parseAgentPreflightOptions(args: readonly string[]): { dryRun: boolean;
       "--nutritionist-meal-read-url-template",
       "--adapter",
       "--board",
+      "--board-config",
       "--config"
     ]),
     "agent-preflight"
@@ -1309,6 +1343,7 @@ function createPreflightChecks(input: {
   readonly timing: AgentScheduleTiming;
   readonly liveSmokeValid: boolean;
   readonly manifestEvidenceDays: readonly string[];
+  readonly boardConfigValid: boolean;
 }): readonly KlAgentPreflightOfflineCheck[] {
   const firstManifestDay = input.manifestEvidenceDays[0];
   const manifestAligned = firstManifestDay === input.timing.date;
@@ -1335,6 +1370,13 @@ function createPreflightChecks(input: {
           : manifestAligned
             ? `Manifest first evidence day matches scheduler date ${input.timing.date}.`
             : `Manifest first evidence day ${firstManifestDay} must match scheduler date ${input.timing.date}.`
+    },
+    {
+      id: "board_publish_config_valid",
+      status: input.boardConfigValid ? "passed" : "blocked",
+      detail: input.boardConfigValid
+        ? "Board publish config validation passed."
+        : "Board publish config has errors."
     }
   ];
 }

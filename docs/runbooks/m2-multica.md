@@ -127,12 +127,13 @@ npm run kl -- agent-preflight --dry-run `
   --timezone Asia/Shanghai `
   --daily-at 07:30 `
   --manifest config/multica/live-smoke.example.json `
+  --board-config config/multica/board-publish.example.json `
   --config config/agents.example.json
 ```
 
-The report embeds the scheduler dry-run output, the live-smoke manifest validation result, deterministic offline checks, and the M2 live proofs that remain `not_verified_offline`. It must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not install a scheduler, must not touch the Multica or pi-harness checkouts, and must not accept `--live`.
+The report embeds the scheduler dry-run output, the live-smoke manifest validation result, the board publish config validation result, deterministic offline checks, and the M2 live proofs that remain `not_verified_offline`. It is the unified offline report for scheduler intent, live-smoke manifest shape, and board publish config shape. It must not fetch Knowledge-Loop, compass-health, or Multica endpoints, must not use bearer tokens, must not install a scheduler, must not touch the Multica or pi-harness checkouts, and must not accept `--live`.
 
-`ready_for_live_smoke` means only that the offline scheduler intent and manifest contract are internally aligned for the selected board date. It does not execute Multica, prove live board posting, prove two consecutive hands-free days, verify failure blockers, verify evening mastery deltas, surface live daily cost, or close M2.
+`ready_for_live_smoke` means only that the offline scheduler intent, manifest contract, and board publish config are internally aligned for the selected board date. It does not execute Multica, prove live board posting, prove two consecutive hands-free days, verify failure blockers, verify evening mastery deltas, surface live daily cost, or close M2.
 
 ## Offline Failure-Blocker Smoke
 

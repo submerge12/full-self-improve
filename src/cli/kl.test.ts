@@ -1694,13 +1694,29 @@ describe("kl CLI handler", () => {
             validation: {
               errors: []
             }
+          },
+          boardConfig: {
+            configPath: "config/multica/board-publish.example.json",
+            valid: true,
+            validation: {
+              errors: [],
+              summary: {
+                contractStatus: "inferred_live_smoke_pending",
+                apiBaseUrl: "http://127.0.0.1:8080",
+                appBaseUrl: "http://127.0.0.1:3000",
+                workspaceSlug: "daily-plan",
+                actions: ["create_task", "add_comment"],
+                commentRequiresIssueId: true
+              }
+            }
           }
         }
       });
       expect(result.result.offlineChecks).toEqual([
         expect.objectContaining({ id: "scheduler_due", status: "passed" }),
         expect.objectContaining({ id: "live_smoke_manifest_valid", status: "passed" }),
-        expect.objectContaining({ id: "manifest_starts_on_schedule_date", status: "passed" })
+        expect.objectContaining({ id: "manifest_starts_on_schedule_date", status: "passed" }),
+        expect.objectContaining({ id: "board_publish_config_valid", status: "passed" })
       ]);
       expect(result.result.requiredLiveProofs.map((proof) => proof.id)).toEqual([
         "multica_self_host_verified",
@@ -1753,6 +1769,131 @@ describe("kl CLI handler", () => {
     }
   });
 
+  test("agent-preflight blocks for an invalid board publish config without fetching", async () => {
+    const manifestPath = "config/multica/live-smoke.valid.test.json";
+    const boardConfigPath = path.join("config", "multica", "board-publish.preflight-invalid.test.json");
+    writeValidLiveSmokeManifestFixture(manifestPath, ["2026-06-14", "2026-06-15"]);
+    writeFileSync(
+      boardConfigPath,
+      JSON.stringify(
+        {
+          contractStatus: "inferred_live_smoke_pending",
+          apiBaseUrl: "http://127.0.0.1:8080",
+          appBaseUrl: "http://127.0.0.1:3000",
+          workspace: {
+            slug: "daily-plan",
+            id: ""
+          },
+          actions: {
+            create_task: {
+              method: "GET",
+              endpointUrl: "http://127.0.0.1:8080/api/issues",
+              payload: {
+                title: "$action.title"
+              }
+            },
+            add_comment: {
+              method: "POST",
+              endpointTemplate: "http://127.0.0.1:8080/api/issues/comments?token=real-token",
+              payload: {
+                content: "$action.body"
+              }
+            }
+          }
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+
+    try {
+      const result = (await handleKlCommand(
+        [
+          "agent-preflight",
+          "--dry-run",
+          "--now",
+          "2026-06-14T07:30:00+08:00",
+          "--timezone",
+          "Asia/Shanghai",
+          "--daily-at",
+          "07:30",
+          "--manifest",
+          manifestPath,
+          "--board-config",
+          boardConfigPath,
+          "--config",
+          "config/agents.example.json"
+        ],
+        {
+          async fetch() {
+            throw new Error("preflight dry-run must not fetch");
+          }
+        }
+      )) as KlAgentPreflightDryRunCommandResult;
+
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.boardConfig.configPath).toBe("config/multica/board-publish.preflight-invalid.test.json");
+      expect(result.result.boardConfig.valid).toBe(false);
+      expect(result.result.boardConfig.validation.summary).toBeUndefined();
+      expect(result.result.boardConfig.validation.errors).toEqual(
+        expect.arrayContaining([
+          "board publish config actions.create_task.method must be POST.",
+          "board publish config actions.create_task.payload.description must be $action.body.",
+          "board publish config must not contain secret-like value at actions.add_comment.endpointTemplate.",
+          "board publish config actions.add_comment.endpointTemplate must include {issueId}."
+        ])
+      );
+      expect(result.result.offlineChecks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "board_publish_config_valid",
+            status: "blocked",
+            detail: "Board publish config has errors."
+          })
+        ])
+      );
+    } finally {
+      unlinkIfExists(manifestPath);
+      unlinkIfExists(boardConfigPath);
+    }
+  });
+
+  test("agent-preflight returns load errors for malformed board publish config JSON", async () => {
+    const manifestPath = "config/multica/live-smoke.valid.test.json";
+    const boardConfigPath = path.join("config", "multica", "board-publish.preflight-malformed.test.json");
+    writeValidLiveSmokeManifestFixture(manifestPath, ["2026-06-14", "2026-06-15"]);
+    writeFileSync(boardConfigPath, "{\n  \"contractStatus\":\n", "utf8");
+
+    try {
+      const result = (await handleKlCommand([
+        "agent-preflight",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--manifest",
+        manifestPath,
+        "--board-config",
+        boardConfigPath
+      ])) as KlAgentPreflightDryRunCommandResult;
+
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.boardConfig.valid).toBe(false);
+      expect(result.result.boardConfig.validation.summary).toBeUndefined();
+      expect(result.result.boardConfig.validation.errors).toEqual(expect.arrayContaining([expect.stringContaining("JSON")]));
+      expect(result.result.offlineChecks).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "board_publish_config_valid", status: "blocked" })])
+      );
+    } finally {
+      unlinkIfExists(manifestPath);
+      unlinkIfExists(boardConfigPath);
+    }
+  });
+
   test("agent-preflight command validates dry-run mode and rejects live mode", async () => {
     await expect(
       handleKlCommand([
@@ -1781,6 +1922,22 @@ describe("kl CLI handler", () => {
         "config/multica/live-smoke.example.json"
       ])
     ).rejects.toThrow(/Unknown option for agent-preflight: --live/);
+    await expect(
+      handleKlCommand([
+        "agent-preflight",
+        "--dry-run",
+        "--now",
+        "2026-06-14T07:30:00+08:00",
+        "--timezone",
+        "Asia/Shanghai",
+        "--daily-at",
+        "07:30",
+        "--manifest",
+        "config/multica/live-smoke.example.json",
+        "--board-config",
+        path.join("..", "board-publish.json")
+      ])
+    ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
   });
 
   test("agent-board-config dry-run validates the checked-in Multica publish contract without fetching", async () => {

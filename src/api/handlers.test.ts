@@ -7,6 +7,7 @@ import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents } from "../db/trace-store.js";
 import { upsertPersistentReviewSchedule } from "../engine/persistent-review.js";
 import type { DocRef, RawDoc, SourceAdapter } from "../engine/source-adapter.js";
+import { createHealthMetric } from "../health-extensions/metrics.js";
 import type { ApiRouteId } from "./contracts.js";
 import { handleApiRequest, type ApiHandlerContext, type ApiRequest } from "./handlers.js";
 
@@ -158,6 +159,208 @@ describe("pure API request handlers", () => {
     expect(response.body).toMatchObject({ ok: true, routeId: "wiki.pages" });
     expect(data.pages).toHaveLength(1);
     expect(data.pages[0]).toMatchObject({ markdown: "Public page", visibility: "public" });
+  });
+
+  test("POST /api/health/metrics creates a manual metric with deterministic handler time", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/metrics", {
+        metricKey: "Weight",
+        metricLabel: "Weight",
+        value: 58.2,
+        unit: "kg",
+        observedAt: "2026-06-14T08:00:00.000Z",
+        note: "morning"
+      }),
+      context({ now: metricNow })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.metrics.create" });
+    const data = responseData<HealthMetricCreateData>(response);
+    expect(data.result.metric).toMatchObject({
+      metricKey: "weight",
+      metricLabel: "Weight",
+      value: 58.2,
+      unit: "kg",
+      observedAt: "2026-06-14T08:00:00.000Z",
+      source: "manual",
+      note: "morning",
+      createdAt: "2026-06-14T08:05:00.000Z",
+      updatedAt: "2026-06-14T08:05:00.000Z"
+    });
+    expect(data.result.traceEvents).toMatchObject([
+      {
+        stage: "metric",
+        message: "Health metric created",
+        timestamp: "2026-06-14T08:05:00.000Z"
+      }
+    ]);
+    expect(countRows("health_metrics")).toBe(1);
+  });
+
+  test("GET /api/health/metrics maps date-only query bounds to an inclusive ISO window", async () => {
+    createHealthMetric(
+      db,
+      {
+        metricKey: "Weight",
+        metricLabel: "Weight",
+        value: 58.2,
+        unit: "kg",
+        observedAt: "2026-06-14T08:00:00.000Z",
+        source: "manual"
+      },
+      { now: "2026-06-14T08:05:00.000Z" }
+    );
+    createHealthMetric(
+      db,
+      {
+        metricKey: "Weight",
+        metricLabel: "Weight",
+        value: 58.4,
+        unit: "kg",
+        observedAt: "2026-06-15T23:30:00.000Z",
+        source: "manual"
+      },
+      { now: "2026-06-15T23:35:00.000Z" }
+    );
+    createHealthMetric(
+      db,
+      {
+        metricKey: "Sleep",
+        metricLabel: "Sleep",
+        value: 7.5,
+        unit: "h",
+        observedAt: "2026-06-15T08:00:00.000Z",
+        source: "manual"
+      },
+      { now: "2026-06-15T08:05:00.000Z" }
+    );
+    createHealthMetric(
+      db,
+      {
+        metricKey: "Weight",
+        metricLabel: "Weight",
+        value: 58.5,
+        unit: "kg",
+        observedAt: "2026-06-16T00:00:00.000Z",
+        source: "manual"
+      },
+      { now: "2026-06-16T00:05:00.000Z" }
+    );
+
+    const response = await handleApiRequest(
+      authRequest("GET", "/api/health/metrics?metric=weight&from=2026-06-14&to=2026-06-15"),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.metrics.list" });
+    const data = responseData<HealthMetricListData>(response);
+    expect(data.metrics.map((metric) => metric.observedAt)).toEqual([
+      "2026-06-14T08:00:00.000Z",
+      "2026-06-15T23:30:00.000Z"
+    ]);
+    expect(data.metrics.every((metric) => metric.metricKey === "weight")).toBe(true);
+  });
+
+  test("PATCH /api/health/metrics updates one metric through the API audit path", async () => {
+    const created = createHealthMetric(
+      db,
+      {
+        metricKey: "Weight",
+        metricLabel: "Weight",
+        value: 58.2,
+        unit: "kg",
+        observedAt: "2026-06-14T08:00:00.000Z",
+        source: "manual"
+      },
+      { now: "2026-06-14T08:01:00.000Z" }
+    );
+
+    const response = await handleApiRequest(
+      authRequest("PATCH", "/api/health/metrics", {
+        id: created.metric.id,
+        value: 58.0,
+        reason: "corrected morning reading"
+      }),
+      context({ now: metricNow })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.metrics.update" });
+    const data = responseData<HealthMetricUpdateData>(response);
+    expect(data.result.metric).toMatchObject({
+      id: created.metric.id,
+      metricKey: "weight",
+      value: 58.0,
+      updatedAt: "2026-06-14T08:05:00.000Z"
+    });
+    expect(data.result.audit).toMatchObject({
+      metricId: created.metric.id,
+      changedAt: "2026-06-14T08:05:00.000Z",
+      changedBy: "api",
+      reason: "corrected morning reading",
+      previous: { value: 58.2 },
+      next: { value: 58.0 }
+    });
+    expect(data.result.traceEvents).toMatchObject([
+      {
+        stage: "metric",
+        message: "Health metric updated",
+        timestamp: "2026-06-14T08:05:00.000Z"
+      }
+    ]);
+    expect(countRows("health_metric_audit_events")).toBe(1);
+  });
+
+  test("POST /api/health/metrics/import imports CSV text with deterministic handler time", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/metrics/import", {
+        sourceFilename: "metrics.csv",
+        csvText: [
+          "metric_key,metric_label,value,unit,observed_at,source,note",
+          "weight,Weight,58.2,kg,2026-06-14T08:00:00.000Z,csv,morning"
+        ].join("\n")
+      }),
+      context({ now: metricNow })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.metrics.import" });
+    const data = responseData<HealthMetricImportData>(response);
+    expect(data.result.importRecord).toMatchObject({
+      sourceFilename: "metrics.csv",
+      rowCount: 1,
+      acceptedCount: 1,
+      rejectedCount: 0,
+      importedAt: "2026-06-14T08:05:00.000Z"
+    });
+    expect(data.result.rows).toMatchObject([
+      {
+        rowNumber: 2,
+        status: "accepted",
+        metric: {
+          metricKey: "weight",
+          source: "csv",
+          createdAt: "2026-06-14T08:05:00.000Z"
+        }
+      }
+    ]);
+  });
+
+  test.each([
+    ["create", "POST", "/api/health/metrics", { metricKey: "weight" }, "health.metrics.create"],
+    ["list", "GET", "/api/health/metrics?metric=weight&from=not-a-date", undefined, "health.metrics.list"],
+    ["update", "PATCH", "/api/health/metrics", { id: 1, value: 58.0 }, "health.metrics.update"],
+    ["import", "POST", "/api/health/metrics/import", { sourceFilename: "metrics.csv" }, "health.metrics.import"]
+  ])("health metric endpoint returns 400 for malformed %s request", async (_name, method, path, body, routeId) => {
+    const response = await handleApiRequest(authRequest(method as ApiRequest["method"], path, body), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId }
+    });
   });
 
   test("GET /api/plan/today is idempotent for the same date and persists trace events", async () => {
@@ -930,6 +1133,10 @@ function fixedNow(): Date {
   return new Date("2026-06-13T08:00:00.000Z");
 }
 
+function metricNow(): Date {
+  return new Date("2026-06-14T08:05:00.000Z");
+}
+
 type SuccessfulApiResponse = {
   readonly status: number;
   readonly body: {
@@ -1046,5 +1253,79 @@ interface ApplicationGradeData extends Record<string, unknown> {
       attemptsN: number;
       lastSeenAt: string | null;
     };
+  };
+}
+
+interface HealthMetricCreateData extends Record<string, unknown> {
+  result: {
+    metric: {
+      id: number;
+      metricKey: string;
+      metricLabel: string;
+      value: number;
+      unit: string;
+      observedAt: string;
+      source: string;
+      note?: string;
+      createdAt: string;
+      updatedAt: string;
+    };
+    traceEvents: Array<{
+      stage: string;
+      message: string;
+      timestamp: string;
+    }>;
+  };
+}
+
+interface HealthMetricListData extends Record<string, unknown> {
+  metrics: Array<{
+    metricKey: string;
+    observedAt: string;
+  }>;
+}
+
+interface HealthMetricUpdateData extends Record<string, unknown> {
+  result: {
+    metric: {
+      id: number;
+      metricKey: string;
+      value: number;
+      updatedAt: string;
+    };
+    audit: {
+      metricId: number;
+      changedAt: string;
+      changedBy: string;
+      reason: string;
+      previous: { value: number };
+      next: { value: number };
+    };
+    traceEvents: Array<{
+      stage: string;
+      message: string;
+      timestamp: string;
+    }>;
+  };
+}
+
+interface HealthMetricImportData extends Record<string, unknown> {
+  result: {
+    importRecord: {
+      sourceFilename: string;
+      rowCount: number;
+      acceptedCount: number;
+      rejectedCount: number;
+      importedAt: string;
+    };
+    rows: Array<{
+      rowNumber: number;
+      status: string;
+      metric: {
+        metricKey: string;
+        source: string;
+        createdAt: string;
+      };
+    }>;
   };
 }

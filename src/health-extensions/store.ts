@@ -40,17 +40,32 @@ import {
   type StoredSedentaryStreak
 } from "./schema.js";
 
-export function insertHealthMetric(db: Database.Database, input: HealthMetricInput): StoredHealthMetric {
+export interface HealthMetricWriteOptions {
+  readonly now?: string;
+}
+
+export interface MetricImportReservation {
+  readonly importRecord: StoredMetricImport;
+  readonly created: boolean;
+}
+
+export function insertHealthMetric(
+  db: Database.Database,
+  input: HealthMetricInput,
+  options: HealthMetricWriteOptions = {}
+): StoredHealthMetric {
   const normalized = normalizeHealthMetricInput(input);
+  const now = options.now === undefined ? null : assertIsoInstant(options.now, "now");
   const row = db
     .prepare(
-      `INSERT INTO health_metrics (metric_key, metric_label, value, unit, observed_at, source, note)
-       VALUES (@metricKey, @metricLabel, @value, @unit, @observedAt, @source, @note)
+      `INSERT INTO health_metrics (metric_key, metric_label, value, unit, observed_at, source, note, created_at, updated_at)
+       VALUES (@metricKey, @metricLabel, @value, @unit, @observedAt, @source, @note, COALESCE(@now, CURRENT_TIMESTAMP), COALESCE(@now, CURRENT_TIMESTAMP))
        RETURNING id, metric_key, metric_label, value, unit, observed_at, source, note, created_at, updated_at`
     )
     .get({
       ...normalized,
-      note: normalized.note ?? null
+      note: normalized.note ?? null,
+      now
     }) as HealthMetricRow;
 
   return mapHealthMetricRow(row);
@@ -66,6 +81,41 @@ export function getHealthMetricById(db: Database.Database, id: number): StoredHe
     .get(assertPositiveInteger(id, "id")) as HealthMetricRow | undefined;
 
   return row === undefined ? undefined : mapHealthMetricRow(row);
+}
+
+export function updateHealthMetricRow(
+  db: Database.Database,
+  id: number,
+  input: HealthMetricInput,
+  options: HealthMetricWriteOptions = {}
+): StoredHealthMetric {
+  const normalized = normalizeHealthMetricInput(input);
+  const now = options.now === undefined ? null : assertIsoInstant(options.now, "now");
+  const row = db
+    .prepare(
+      `UPDATE health_metrics
+       SET metric_key = @metricKey,
+           metric_label = @metricLabel,
+           value = @value,
+           unit = @unit,
+           observed_at = @observedAt,
+           source = @source,
+           note = @note,
+           updated_at = COALESCE(@now, CURRENT_TIMESTAMP)
+       WHERE id = @id
+       RETURNING id, metric_key, metric_label, value, unit, observed_at, source, note, created_at, updated_at`
+    )
+    .get({
+      id: assertPositiveInteger(id, "id"),
+      ...normalized,
+      note: normalized.note ?? null,
+      now
+    }) as HealthMetricRow | undefined;
+
+  if (row === undefined) {
+    throw new Error("health metric not found");
+  }
+  return mapHealthMetricRow(row);
 }
 
 export function listHealthMetrics(db: Database.Database, query: HealthMetricQuery): StoredHealthMetric[] {
@@ -142,6 +192,10 @@ export function insertMetricAuditEvent(db: Database.Database, input: MetricAudit
 }
 
 export function insertMetricImportRecord(db: Database.Database, input: MetricImportInput): StoredMetricImport {
+  return reserveMetricImportRecord(db, input).importRecord;
+}
+
+export function reserveMetricImportRecord(db: Database.Database, input: MetricImportInput): MetricImportReservation {
   const normalized = normalizeMetricImportInput(input);
   const row = db
     .prepare(
@@ -154,14 +208,14 @@ export function insertMetricImportRecord(db: Database.Database, input: MetricImp
     .get(normalized) as MetricImportRow | undefined;
 
   if (row !== undefined) {
-    return mapMetricImportRow(row);
+    return { importRecord: mapMetricImportRow(row), created: true };
   }
 
   const existing = findMetricImportByHash(db, normalized.contentHash);
   if (existing === undefined) {
     throw new Error("metric import insert did not return or find a row");
   }
-  return existing;
+  return { importRecord: existing, created: false };
 }
 
 export function findMetricImportByHash(db: Database.Database, contentHash: string): StoredMetricImport | undefined {

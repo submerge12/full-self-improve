@@ -211,6 +211,12 @@ type CountableTable =
   | "reviews"
   | "trace_events";
 
+type HealthCountableTable =
+  | "health_metrics"
+  | "health_metric_audit_events"
+  | "health_metric_imports"
+  | "health_trace_events";
+
 interface TraceCliCommandResult {
   command: "trace";
   mode: "mock-persistent";
@@ -232,6 +238,13 @@ interface TraceCliCommandResult {
 
 type TraceCliEvent = TraceCliCommandResult["result"]["events"][number];
 
+interface HealthMetricCliCommandResult {
+  command: "health-metric";
+  mode: "mock-persistent";
+  action: "add" | "list" | "update" | "import-csv";
+  result: unknown;
+}
+
 const DOMAIN_COUNTABLE_TABLES = [
   "schema_migrations",
   "sources",
@@ -248,6 +261,16 @@ const DOMAIN_COUNTABLE_TABLES = [
 ] as const satisfies readonly CountableTable[];
 
 function countRows(dbPath: string, table: CountableTable): number {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
+    return row.count;
+  } finally {
+    db.close();
+  }
+}
+
+function countHealthRows(dbPath: string, table: HealthCountableTable): number {
   const db = new Database(dbPath, { readonly: true });
   try {
     const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
@@ -498,6 +521,19 @@ function createTraceDb(): string {
   return dbPath;
 }
 
+function createHealthMetricDb(): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-db-"));
+  const dbPath = path.join(dbDir, "metrics.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
 function readQuizRows(dbPath: string): {
   items: Array<{ id: number; conceptSlug: string; statement: string; answerSpec: unknown }>;
   attempts: Array<{ id: number; itemId: number; response: string; verdict: string; gradingMethod: string }>;
@@ -711,8 +747,473 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
+  });
+
+  test("health-metric add creates a manual metric and writes health trace JSON", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-add-")), "metrics.db");
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "health-metric",
+        "add",
+        "--db",
+        dbPath,
+        "--metric",
+        "weight",
+        "--label",
+        "Weight",
+        "--value",
+        "58.2",
+        "--unit",
+        "kg",
+        "--observed-at",
+        "2026-06-14T08:00:00.000Z"
+      ],
+      { stdout: stdout.sink }
+    )) as unknown as HealthMetricCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "add",
+      result: {
+        metric: {
+          id: 1,
+          metricKey: "weight",
+          metricLabel: "Weight",
+          value: 58.2,
+          unit: "kg",
+          observedAt: "2026-06-14T08:00:00.000Z",
+          source: "manual"
+        },
+        traceEvents: [{ stage: "metric", message: "Health metric created" }]
+      }
+    });
+    expect(countHealthRows(dbPath, "health_metrics")).toBe(1);
+    expect(countHealthRows(dbPath, "health_trace_events")).toBe(1);
+    expect(countRows(dbPath, "trace_events")).toBe(0);
+  });
+
+  test("health-metric list filters metrics with date-only bounds without mutating the db", async () => {
+    const dbPath = createHealthMetricDb();
+    await handleKlCommand([
+      "health-metric",
+      "add",
+      "--db",
+      dbPath,
+      "--metric",
+      "weight",
+      "--label",
+      "Weight",
+      "--value",
+      "58.2",
+      "--unit",
+      "kg",
+      "--observed-at",
+      "2026-06-14T08:00:00.000Z"
+    ]);
+    await handleKlCommand([
+      "health-metric",
+      "add",
+      "--db",
+      dbPath,
+      "--metric",
+      "sleep",
+      "--label",
+      "Sleep",
+      "--value",
+      "7.5",
+      "--unit",
+      "hours",
+      "--observed-at",
+      "2026-06-14T22:00:00.000Z"
+    ]);
+    const beforeRows = {
+      metrics: countHealthRows(dbPath, "health_metrics"),
+      audits: countHealthRows(dbPath, "health_metric_audit_events"),
+      imports: countHealthRows(dbPath, "health_metric_imports"),
+      healthTraces: countHealthRows(dbPath, "health_trace_events"),
+      legacyTraces: countRows(dbPath, "trace_events")
+    };
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "health-metric",
+        "list",
+        "--db",
+        dbPath,
+        "--metric",
+        "weight",
+        "--from",
+        "2026-06-14",
+        "--to",
+        "2026-06-15"
+      ],
+      { stdout: stdout.sink }
+    )) as unknown as HealthMetricCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toEqual({
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "list",
+      result: [
+        expect.objectContaining({
+          id: 1,
+          metricKey: "weight",
+          metricLabel: "Weight",
+          value: 58.2,
+          unit: "kg",
+          observedAt: "2026-06-14T08:00:00.000Z",
+          source: "manual"
+        })
+      ]
+    });
+    expect({
+      metrics: countHealthRows(dbPath, "health_metrics"),
+      audits: countHealthRows(dbPath, "health_metric_audit_events"),
+      imports: countHealthRows(dbPath, "health_metric_imports"),
+      healthTraces: countHealthRows(dbPath, "health_trace_events"),
+      legacyTraces: countRows(dbPath, "trace_events")
+    }).toEqual(beforeRows);
+  });
+
+  test("health-metric update records a CLI audit and health trace", async () => {
+    const dbPath = createHealthMetricDb();
+    await handleKlCommand([
+      "health-metric",
+      "add",
+      "--db",
+      dbPath,
+      "--metric",
+      "weight",
+      "--label",
+      "Weight",
+      "--value",
+      "58.2",
+      "--unit",
+      "kg",
+      "--observed-at",
+      "2026-06-14T08:00:00.000Z"
+    ]);
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "health-metric",
+        "update",
+        "--db",
+        dbPath,
+        "--id",
+        "1",
+        "--value",
+        "58.0",
+        "--reason",
+        "corrected morning reading"
+      ],
+      { stdout: stdout.sink }
+    )) as unknown as HealthMetricCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "update",
+      result: {
+        metric: {
+          id: 1,
+          value: 58.0,
+          updatedAt: expect.any(String)
+        },
+        audit: {
+          id: 1,
+          metricId: 1,
+          changedBy: "cli",
+          reason: "corrected morning reading",
+          previous: { value: 58.2 },
+          next: { value: 58.0 }
+        },
+        traceEvents: [{ stage: "metric", message: "Health metric updated" }]
+      }
+    });
+    expect(countHealthRows(dbPath, "health_metric_audit_events")).toBe(1);
+    expect(countHealthRows(dbPath, "health_trace_events")).toBe(2);
+    expect(countRows(dbPath, "trace_events")).toBe(0);
+  });
+
+  test("health-metric import-csv imports an existing checkout-local csv file", async () => {
+    const dbPath = createHealthMetricDb();
+    const csvPath = path.join(path.dirname(dbPath), "metrics.csv");
+    writeFileSync(
+      csvPath,
+      [
+        "metric_key,metric_label,value,unit,observed_at,note",
+        "weight,Weight,58.2,kg,2026-06-14T08:00:00.000Z,morning reading",
+        "sleep,Sleep,7.5,hours,2026-06-14T22:00:00.000Z,"
+      ].join("\n"),
+      "utf8"
+    );
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      ["health-metric", "import-csv", "--db", dbPath, "--file", csvPath],
+      { stdout: stdout.sink }
+    )) as unknown as HealthMetricCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "import-csv",
+      result: {
+        importRecord: {
+          id: 1,
+          sourceFilename: "metrics.csv",
+          rowCount: 2,
+          acceptedCount: 2,
+          rejectedCount: 0
+        },
+        duplicate: false,
+        rows: [
+          { rowNumber: 2, status: "accepted", metric: { metricKey: "weight", source: "csv" } },
+          { rowNumber: 3, status: "accepted", metric: { metricKey: "sleep", source: "csv" } }
+        ],
+        traceEvents: [{ stage: "metric", message: "Health metrics CSV imported" }]
+      }
+    });
+    expect(countHealthRows(dbPath, "health_metric_imports")).toBe(1);
+    expect(countHealthRows(dbPath, "health_metrics")).toBe(2);
+    expect(countHealthRows(dbPath, "health_trace_events")).toBe(1);
+    expect(countRows(dbPath, "trace_events")).toBe(0);
+  });
+
+  test("health-metric import-csv rejects a non-csv regular file before inserting imports", async () => {
+    const dbPath = createHealthMetricDb();
+    const textPath = path.join(path.dirname(dbPath), "metrics.txt");
+    writeFileSync(
+      textPath,
+      "metric_key,metric_label,value,unit,observed_at\nweight,Weight,58.2,kg,2026-06-14T08:00:00.000Z\n",
+      "utf8"
+    );
+
+    await expect(handleKlCommand(["health-metric", "import-csv", "--db", dbPath, "--file", textPath])).rejects.toThrow(
+      /CSV file must use a \.csv extension/
+    );
+
+    expect(countHealthRows(dbPath, "health_metric_imports")).toBe(0);
+    expect(countHealthRows(dbPath, "health_metrics")).toBe(0);
+  });
+
+  test("health-metric import-csv rejects compass-health paths before inserting imports", async () => {
+    const dbPath = createHealthMetricDb();
+    const compassDir = mkdtempSync(path.join(tmpdir(), "compass-health-fixture-"));
+    const csvPath = path.join(compassDir, "metrics.csv");
+    writeFileSync(
+      csvPath,
+      "metric_key,metric_label,value,unit,observed_at\nweight,Weight,58.2,kg,2026-06-14T08:00:00.000Z\n",
+      "utf8"
+    );
+
+    await expect(handleKlCommand(["health-metric", "import-csv", "--db", dbPath, "--file", csvPath])).rejects.toThrow(
+      /Health metric CSV must not be read from compass-health files/
+    );
+    await expect(handleKlCommand(["health-metric", "import-csv", "--db", dbPath, "--file", csvPath])).rejects.not.toThrow(
+      csvPath
+    );
+
+    expect(countHealthRows(dbPath, "health_metric_imports")).toBe(0);
+    expect(countHealthRows(dbPath, "health_metrics")).toBe(0);
+  });
+
+  test("health-metric add rejects invalid domain inputs before creating a missing db", async () => {
+    const cases: Array<{
+      readonly name: string;
+      readonly option: "--metric" | "--label" | "--unit" | "--observed-at" | "--now";
+      readonly value: string;
+      readonly error: RegExp;
+    }> = [
+      {
+        name: "invalid observed instant",
+        option: "--observed-at",
+        value: "2026-06-14",
+        error: /observedAt must be an ISO instant|Invalid --observed-at/
+      },
+      {
+        name: "invalid now instant",
+        option: "--now",
+        value: "2026-06-14",
+        error: /Invalid --now value "2026-06-14"/
+      },
+      {
+        name: "blank label",
+        option: "--label",
+        value: "   ",
+        error: /metricLabel is required/
+      },
+      {
+        name: "blank metric",
+        option: "--metric",
+        value: "   ",
+        error: /metricKey is required/
+      },
+      {
+        name: "invalid metric",
+        option: "--metric",
+        value: "!!!",
+        error: /metricKey must contain at least one alphanumeric character/
+      },
+      {
+        name: "blank unit",
+        option: "--unit",
+        value: "   ",
+        error: /unit is required/
+      },
+      {
+        name: "unsafe unit",
+        option: "--unit",
+        value: "kg\u0001",
+        error: /unit contains unsupported control characters/
+      }
+    ];
+
+    for (const testCase of cases) {
+      const dbPath = path.join(
+        mkdtempSync(path.join(tmpdir(), `kl-cli-health-metric-invalid-${testCase.name.replace(/\s+/g, "-")}-`)),
+        "missing.db"
+      );
+      const argv = [
+        "health-metric",
+        "add",
+        "--db",
+        dbPath,
+        "--metric",
+        "weight",
+        "--label",
+        "Weight",
+        "--value",
+        "58.2",
+        "--unit",
+        "kg",
+        "--observed-at",
+        "2026-06-14T08:00:00.000Z"
+      ];
+
+      if (testCase.option === "--now") {
+        argv.push("--now", testCase.value);
+      } else {
+        argv[argv.indexOf(testCase.option) + 1] = testCase.value;
+      }
+
+      await expect(handleKlCommand(argv)).rejects.toThrow(testCase.error);
+      expect(existsSync(dbPath)).toBe(false);
+    }
+  });
+
+  test("health-metric validates options before creating missing databases where possible", async () => {
+    const addDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-invalid-add-")), "missing.db");
+    const updateDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-invalid-update-")), "missing.db");
+
+    await expect(
+      handleKlCommand([
+        "health-metric",
+        "add",
+        "--db",
+        addDbPath,
+        "--metric",
+        "weight",
+        "--label",
+        "Weight",
+        "--value",
+        "not-a-number",
+        "--unit",
+        "kg",
+        "--observed-at",
+        "2026-06-14T08:00:00.000Z"
+      ])
+    ).rejects.toThrow(/Invalid --value value "not-a-number"/);
+    await expect(
+      handleKlCommand([
+        "health-metric",
+        "update",
+        "--db",
+        updateDbPath,
+        "--id",
+        "0",
+        "--value",
+        "58.0",
+        "--reason",
+        "corrected morning reading"
+      ])
+    ).rejects.toThrow(/Invalid --id value "0"/);
+
+    expect(existsSync(addDbPath)).toBe(false);
+    expect(existsSync(updateDbPath)).toBe(false);
+  });
+
+  test("health-metric list update and import-csv do not create missing databases", async () => {
+    const listDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-missing-list-")), "missing.db");
+    const updateDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-missing-update-")), "missing.db");
+    const importDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-missing-import-")), "missing.db");
+    const csvPath = path.join(path.dirname(importDbPath), "metrics.csv");
+    writeFileSync(
+      csvPath,
+      "metric_key,metric_label,value,unit,observed_at\nweight,Weight,58.2,kg,2026-06-14T08:00:00.000Z\n",
+      "utf8"
+    );
+
+    await expect(
+      handleKlCommand([
+        "health-metric",
+        "list",
+        "--db",
+        listDbPath,
+        "--metric",
+        "weight",
+        "--from",
+        "2026-06-14",
+        "--to",
+        "2026-06-15"
+      ])
+    ).rejects.toThrow();
+    await expect(
+      handleKlCommand([
+        "health-metric",
+        "update",
+        "--db",
+        updateDbPath,
+        "--id",
+        "1",
+        "--value",
+        "58.0",
+        "--reason",
+        "corrected morning reading"
+      ])
+    ).rejects.toThrow();
+    await expect(handleKlCommand(["health-metric", "import-csv", "--db", importDbPath, "--file", csvPath])).rejects.toThrow();
+
+    expect(existsSync(listDbPath)).toBe(false);
+    expect(existsSync(updateDbPath)).toBe(false);
+    expect(existsSync(importDbPath)).toBe(false);
+  });
+
+  test("health-metric rejects missing duplicate and unknown options", async () => {
+    const dbPath = createHealthMetricDb();
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["health-metric", "list", "--metric", "weight"])).rejects.toThrow(
+      /requires exactly one --db/
+    );
+    await expect(
+      handleKlCommand(["health-metric", "list", "--db", dbPath, "--db", otherDbPath, "--metric", "weight"])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand(["health-metric", "add", "--db", dbPath, "--metric", "weight", "--bogus", "1"])
+    ).rejects.toThrow(/Unknown option for health-metric add: --bogus/);
   });
 
   test("agent dry-run prints planned Multica actions without requiring API keys", async () => {

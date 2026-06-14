@@ -28,6 +28,13 @@ import {
 import { gradePersistentTeachback } from "../engine/persistent-teachback.js";
 import type { SourceAdapter } from "../engine/source-adapter.js";
 import type { TraceEvent } from "../engine/trace.js";
+import {
+  createHealthMetric,
+  importHealthMetricsCsv,
+  queryHealthMetrics,
+  updateHealthMetric
+} from "../health-extensions/metrics.js";
+import { assertIsoDate, assertIsoInstant, type HealthMetricQuery } from "../health-extensions/schema.js";
 
 export interface ApiRequest {
   readonly method: ApiMethod;
@@ -110,6 +117,33 @@ interface ReviewAttemptBody {
   reviewedAt: string;
 }
 
+interface HealthMetricCreateBody {
+  metricKey: string;
+  metricLabel: string;
+  value: number;
+  unit: string;
+  observedAt: string;
+  note?: string;
+}
+
+interface HealthMetricUpdateBody {
+  id: number;
+  changes: {
+    metricKey?: string;
+    metricLabel?: string;
+    value?: number;
+    unit?: string;
+    observedAt?: string;
+    note?: string;
+  };
+  reason: string;
+}
+
+interface HealthMetricImportBody {
+  sourceFilename: string;
+  csvText: string;
+}
+
 class ApiBadRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -165,6 +199,14 @@ export async function handleApiRequest(
         return handleReviewAttempt(request, context);
       case "wiki.pages":
         return successResponse("wiki.pages", { pages: listPublicPages(context.db) });
+      case "health.metrics.create":
+        return handleHealthMetricCreate(request, context);
+      case "health.metrics.list":
+        return handleHealthMetricList(request, context);
+      case "health.metrics.update":
+        return handleHealthMetricUpdate(request, context);
+      case "health.metrics.import":
+        return handleHealthMetricImport(request, context);
     }
   } catch (error) {
     if (error instanceof ApiBadRequestError || isRouteInputError(route.id, error)) {
@@ -285,6 +327,52 @@ function handleReviewAttempt(request: ApiRequest, context: ApiHandlerContext): A
   return successResponse("review.attempt", { result });
 }
 
+function handleHealthMetricCreate(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseHealthMetricCreateBody(request.body);
+  const result = createHealthMetric(
+    context.db,
+    {
+      ...body,
+      source: "manual"
+    },
+    { now: nowDate(context).toISOString() }
+  );
+
+  return successResponse("health.metrics.create", { result });
+}
+
+function handleHealthMetricList(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const metrics = queryHealthMetrics(context.db, parseHealthMetricListQuery(request.path));
+
+  return successResponse("health.metrics.list", { metrics });
+}
+
+function handleHealthMetricUpdate(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseHealthMetricUpdateBody(request.body);
+  const result = updateHealthMetric(context.db, {
+    id: body.id,
+    changes: body.changes,
+    changedBy: "api",
+    reason: body.reason,
+    now: nowDate(context).toISOString(),
+    runId: `health-metric-api-update-${body.id}`
+  });
+
+  return successResponse("health.metrics.update", { result });
+}
+
+function handleHealthMetricImport(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseHealthMetricImportBody(request.body);
+  const importedAt = nowDate(context).toISOString();
+  const result = importHealthMetricsCsv(context.db, {
+    ...body,
+    importedAt,
+    runId: `health-metrics-api-import-${importedAt}`
+  });
+
+  return successResponse("health.metrics.import", { result });
+}
+
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
   db: Database.Database,
   mutation: () => T
@@ -377,6 +465,68 @@ function parseReviewAttemptBody(body: unknown): ReviewAttemptBody {
   };
 }
 
+function parseHealthMetricCreateBody(body: unknown): HealthMetricCreateBody {
+  const record = parseBodyRecord(body);
+  const note = optionalString(record.note, "note");
+
+  return {
+    metricKey: requiredString(record, "metricKey"),
+    metricLabel: requiredString(record, "metricLabel"),
+    value: requiredFiniteNumber(record, "value"),
+    unit: requiredString(record, "unit"),
+    observedAt: requiredString(record, "observedAt"),
+    ...(note === undefined ? {} : { note })
+  };
+}
+
+function parseHealthMetricUpdateBody(body: unknown): HealthMetricUpdateBody {
+  const record = parseBodyRecord(body);
+  const changes: HealthMetricUpdateBody["changes"] = {};
+  const metricKey = optionalNonEmptyString(record.metricKey, "metricKey");
+  const metricLabel = optionalNonEmptyString(record.metricLabel, "metricLabel");
+  const value = optionalFiniteNumber(record.value, "value");
+  const unit = optionalNonEmptyString(record.unit, "unit");
+  const observedAt = optionalNonEmptyString(record.observedAt, "observedAt");
+  const note = optionalString(record.note, "note");
+
+  if (metricKey !== undefined) {
+    changes.metricKey = metricKey;
+  }
+  if (metricLabel !== undefined) {
+    changes.metricLabel = metricLabel;
+  }
+  if (value !== undefined) {
+    changes.value = value;
+  }
+  if (unit !== undefined) {
+    changes.unit = unit;
+  }
+  if (observedAt !== undefined) {
+    changes.observedAt = observedAt;
+  }
+  if (note !== undefined) {
+    changes.note = note;
+  }
+  if (Object.keys(changes).length === 0) {
+    throw new ApiBadRequestError("Health metric update requires at least one changed field.");
+  }
+
+  return {
+    id: requiredPositiveInteger(record, "id"),
+    changes,
+    reason: requiredString(record, "reason")
+  };
+}
+
+function parseHealthMetricImportBody(body: unknown): HealthMetricImportBody {
+  const record = parseBodyRecord(body);
+
+  return {
+    sourceFilename: requiredString(record, "sourceFilename"),
+    csvText: requiredString(record, "csvText")
+  };
+}
+
 function parseReviewDueQuery(path: string): ReviewDueQuery {
   const url = parseRequestPath(path);
   const target = url.searchParams.get("target");
@@ -389,6 +539,25 @@ function parseReviewDueQuery(path: string): ReviewDueQuery {
 
   return {
     target,
+    ...(limit === undefined ? {} : { limit })
+  };
+}
+
+function parseHealthMetricListQuery(path: string): HealthMetricQuery {
+  const url = parseRequestPath(path);
+  const metric = url.searchParams.get("metric");
+  const observedFrom = parseHealthMetricQueryInstant(url.searchParams.get("from"), "from", "start");
+  const observedTo = parseHealthMetricQueryInstant(url.searchParams.get("to"), "to", "end");
+  const limit = parseHealthMetricQueryLimit(url.searchParams.get("limit"));
+
+  if (observedFrom !== undefined && observedTo !== undefined && observedFrom > observedTo) {
+    throw new ApiBadRequestError("Health metric query from must be before or equal to to.");
+  }
+
+  return {
+    ...(metric === null ? {} : { metricKey: requiredQueryString(metric, "metric") }),
+    ...(observedFrom === undefined ? {} : { observedFrom }),
+    ...(observedTo === undefined ? {} : { observedTo }),
     ...(limit === undefined ? {} : { limit })
   };
 }
@@ -494,6 +663,51 @@ function requiredPositiveInteger(record: Record<string, unknown>, field: string)
   return value;
 }
 
+function requiredFiniteNumber(record: Record<string, unknown>, field: string): number {
+  const value = record[field];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a finite number.`);
+  }
+
+  return value;
+}
+
+function optionalNonEmptyString(value: unknown, field: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a non-empty string.`);
+  }
+
+  return value;
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiBadRequestError(`Request body field ${field} must be a string.`);
+  }
+
+  return value;
+}
+
+function optionalFiniteNumber(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a finite number.`);
+  }
+
+  return value;
+}
+
 function requiredReviewRating(value: unknown): PersistentReviewRating {
   if (value === "again" || value === "hard" || value === "good" || value === "easy") {
     return value;
@@ -510,6 +724,53 @@ function parseQueryLimit(value: string): number {
   const limit = Number(value);
   if (!Number.isSafeInteger(limit)) {
     throw new ApiBadRequestError("Review due-list query parameter limit must be a positive safe integer string.");
+  }
+
+  return limit;
+}
+
+function requiredQueryString(value: string, field: string): string {
+  if (value.trim().length === 0) {
+    throw new ApiBadRequestError(`Health metric query parameter ${field} must be a non-empty string.`);
+  }
+
+  return value;
+}
+
+function parseHealthMetricQueryInstant(
+  value: string | null,
+  field: "from" | "to",
+  boundary: "start" | "end"
+): string | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  try {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      const date = assertIsoDate(value, field);
+
+      return boundary === "start" ? `${date}T00:00:00.000Z` : `${date}T23:59:59.999Z`;
+    }
+
+    return assertIsoInstant(value, field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
+function parseHealthMetricQueryLimit(value: string | null): number | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new ApiBadRequestError("Health metric query parameter limit must be a positive safe integer string.");
+  }
+
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit)) {
+    throw new ApiBadRequestError("Health metric query parameter limit must be a positive safe integer string.");
   }
 
   return limit;
@@ -619,6 +880,11 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
       return isReviewDueInputError(error.message);
     case "review.attempt":
       return isReviewAttemptInputError(error.message);
+    case "health.metrics.create":
+    case "health.metrics.list":
+    case "health.metrics.update":
+    case "health.metrics.import":
+      return isHealthMetricInputError(error.message);
     default:
       return false;
   }
@@ -679,6 +945,24 @@ function isReviewAttemptInputError(message: string): boolean {
   );
 }
 
+function isHealthMetricInputError(message: string): boolean {
+  return (
+    message === "health metric not found" ||
+    message === "metric update must change at least one field" ||
+    message === "csvText is required" ||
+    message === "csvText must be text" ||
+    message === "CSV must include a header row" ||
+    message === "CSV quoted field must end before delimiter" ||
+    message === "CSV quote must start a quoted field" ||
+    message === "CSV quoted field is not closed" ||
+    message === "source must be manual, csv, or mock" ||
+    message === "acceptedCount and rejectedCount must total rowCount" ||
+    /^CSV is missing .+ column$/.test(message) ||
+    /^(metricKey|metricLabel|unit|observedAt|note|now|reason|sourceFilename|importedAt|contentHash) /.test(message) ||
+    /^(value|id|metricId|rowCount|acceptedCount|rejectedCount) /.test(message)
+  );
+}
+
 function isConceptNotFoundMessage(message: string): boolean {
   return message.startsWith("Concept ") && message.endsWith(" was not found.");
 }
@@ -694,4 +978,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
   const prototype = Object.getPrototypeOf(value) as unknown;
   return prototype === Object.prototype || prototype === null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -96,6 +96,13 @@ import {
   gradePersistentTeachback,
   type PersistentTeachbackGradeResult
 } from "../engine/persistent-teachback.js";
+import {
+  createHealthMetric,
+  importHealthMetricsCsv,
+  queryHealthMetrics,
+  updateHealthMetric
+} from "../health-extensions/metrics.js";
+import { normalizeHealthMetricInput, normalizeMetricKey } from "../health-extensions/schema.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -207,6 +214,13 @@ export interface KlPersistentTraceCommandResult {
 }
 
 export type KlTraceCommandResult = KlPersistentTraceCommandResult;
+
+export interface KlHealthMetricCommandResult {
+  readonly command: "health-metric";
+  readonly mode: "mock-persistent";
+  readonly action: "add" | "list" | "update" | "import-csv";
+  readonly result: unknown;
+}
 
 export interface KlAgentDryRunCommandResult {
   command: "agent";
@@ -392,6 +406,7 @@ export type KlCommandResult =
   | KlDiagnoseCommandResult
   | KlReviewCommandResult
   | KlTraceCommandResult
+  | KlHealthMetricCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
@@ -431,6 +446,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
 
   if (command === "trace") {
     return runTraceCommand(args);
+  }
+
+  if (command === "health-metric") {
+    return runHealthMetricCommand(args);
   }
 
   if (command === "application") {
@@ -478,7 +497,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -718,6 +737,174 @@ function runTraceCommand(args: readonly string[]): KlTraceCommandResult {
         eventCount: events.length,
         events
       }
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthMetricCommand(args: readonly string[]): KlHealthMetricCommandResult {
+  const [action, ...actionArgs] = args;
+
+  if (action === "add") {
+    return runHealthMetricAddCommand(actionArgs);
+  }
+  if (action === "list") {
+    return runHealthMetricListCommand(actionArgs);
+  }
+  if (action === "update") {
+    return runHealthMetricUpdateCommand(actionArgs);
+  }
+  if (action === "import-csv") {
+    return runHealthMetricImportCsvCommand(actionArgs);
+  }
+
+  throw new UsageError(
+    `Command health-metric requires one action: add, list, update, or import-csv. Received "${action ?? ""}".`
+  );
+}
+
+function runHealthMetricAddCommand(args: readonly string[]): KlHealthMetricCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--metric", "--label", "--value", "--unit", "--observed-at", "--note", "--now"]),
+    "health-metric add"
+  );
+  const dbPath = requireOne(options, "--db", "health-metric add");
+  const metricKey = requireOne(options, "--metric", "health-metric add");
+  const metricLabel = requireOne(options, "--label", "health-metric add");
+  const value = parseMetricNumber(requireOne(options, "--value", "health-metric add"), "--value");
+  const unit = requireOne(options, "--unit", "health-metric add");
+  const observedAt = requireOne(options, "--observed-at", "health-metric add");
+  const note = optionalOne(options, "--note", "health-metric add");
+  const now = optionalOne(options, "--now", "health-metric add");
+  const input = normalizeHealthMetricInput({
+    metricKey,
+    metricLabel,
+    value,
+    unit,
+    observedAt,
+    source: "manual",
+    ...(note === undefined ? {} : { note })
+  });
+  const normalizedNow = now === undefined ? undefined : parseCliIsoInstant(now, "--now");
+  const db = new Database(dbPath);
+
+  try {
+    applyMigrations(db);
+    const result = createHealthMetric(
+      db,
+      input,
+      normalizedNow === undefined ? {} : { now: normalizedNow }
+    );
+
+    return {
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "add",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthMetricListCommand(args: readonly string[]): KlHealthMetricCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--metric", "--from", "--to"]), "health-metric list");
+  const dbPath = requireOne(options, "--db", "health-metric list");
+  const metricValue = optionalOne(options, "--metric", "health-metric list");
+  const fromValue = optionalOne(options, "--from", "health-metric list");
+  const toValue = optionalOne(options, "--to", "health-metric list");
+  const metricKey = metricValue === undefined ? undefined : normalizeMetricKey(metricValue);
+  const observedFrom =
+    fromValue === undefined ? undefined : parseMetricDateBound(fromValue, "--from", "start-of-day");
+  const observedTo = toValue === undefined ? undefined : parseMetricDateBound(toValue, "--to", "end-of-day");
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+  try {
+    const result = queryHealthMetrics(db, {
+      ...(metricKey === undefined ? {} : { metricKey }),
+      ...(observedFrom === undefined ? {} : { observedFrom }),
+      ...(observedTo === undefined ? {} : { observedTo })
+    });
+
+    return {
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "list",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthMetricUpdateCommand(args: readonly string[]): KlHealthMetricCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--id", "--metric", "--label", "--value", "--unit", "--observed-at", "--note", "--reason", "--now"]),
+    "health-metric update"
+  );
+  const dbPath = requireOne(options, "--db", "health-metric update");
+  const id = parsePositiveSafeInteger(requireOne(options, "--id", "health-metric update"), "--id");
+  const metricKey = optionalOne(options, "--metric", "health-metric update");
+  const metricLabel = optionalOne(options, "--label", "health-metric update");
+  const valueText = optionalOne(options, "--value", "health-metric update");
+  const unit = optionalOne(options, "--unit", "health-metric update");
+  const observedAt = optionalOne(options, "--observed-at", "health-metric update");
+  const note = optionalOne(options, "--note", "health-metric update");
+  const reason = requireOne(options, "--reason", "health-metric update");
+  const now = optionalOne(options, "--now", "health-metric update");
+  const value = valueText === undefined ? undefined : parseMetricNumber(valueText, "--value");
+  const db = new Database(dbPath, { fileMustExist: true });
+
+  try {
+    const result = updateHealthMetric(db, {
+      id,
+      changes: {
+        ...(metricKey === undefined ? {} : { metricKey }),
+        ...(metricLabel === undefined ? {} : { metricLabel }),
+        ...(value === undefined ? {} : { value }),
+        ...(unit === undefined ? {} : { unit }),
+        ...(observedAt === undefined ? {} : { observedAt }),
+        ...(note === undefined ? {} : { note })
+      },
+      changedBy: "cli",
+      reason,
+      ...(now === undefined ? {} : { now })
+    });
+
+    return {
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "update",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthMetricImportCsvCommand(args: readonly string[]): KlHealthMetricCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--file", "--imported-at"]), "health-metric import-csv");
+  const dbPath = requireOne(options, "--db", "health-metric import-csv");
+  const filePath = requireOne(options, "--file", "health-metric import-csv");
+  const importedAt = optionalOne(options, "--imported-at", "health-metric import-csv");
+  const { csvText, sourceFilename } = readHealthMetricCsvFile(filePath);
+  const db = new Database(dbPath, { fileMustExist: true });
+
+  try {
+    const result = importHealthMetricsCsv(db, {
+      sourceFilename,
+      csvText,
+      ...(importedAt === undefined ? {} : { importedAt })
+    });
+
+    return {
+      command: "health-metric",
+      mode: "mock-persistent",
+      action: "import-csv",
+      result
     };
   } finally {
     db.close();
@@ -1866,6 +2053,87 @@ function persistCommandTraceEvents(db: Database.Database, result: { traceEvents:
   }
 
   persistTraceEvents(db, result.traceEvents);
+}
+
+function parseMetricNumber(value: string, optionName: string): number {
+  const trimmed = value.trim();
+  const parsed = Number(trimmed);
+
+  if (trimmed.length === 0 || !Number.isFinite(parsed) || Math.abs(parsed) >= 1.0e308) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a finite metric value.`);
+  }
+
+  return parsed;
+}
+
+function parseMetricDateBound(
+  value: string,
+  optionName: string,
+  dateOnlyMode: "start-of-day" | "end-of-day"
+): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    assertCliIsoDate(value, optionName);
+    return dateOnlyMode === "start-of-day" ? `${value}T00:00:00.000Z` : `${value}T23:59:59.999Z`;
+  }
+
+  return parseCliIsoInstant(value, optionName);
+}
+
+function parseCliIsoInstant(value: string, optionName: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime()) || date.toISOString() !== value) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected an ISO instant.`);
+  }
+
+  return value;
+}
+
+function assertCliIsoDate(value: string, optionName: string): void {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (match === null) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected an ISO date.`);
+  }
+
+  const normalized = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])))
+    .toISOString()
+    .slice(0, 10);
+  if (normalized !== value) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected an ISO date.`);
+  }
+}
+
+function readHealthMetricCsvFile(filePath: string): { csvText: string; sourceFilename: string } {
+  const resolvedPath = path.resolve(process.cwd(), filePath);
+  const displayName = path.basename(filePath) || "CSV file";
+
+  if (!existsSync(resolvedPath)) {
+    throw new UsageError(`Health metric CSV file does not exist: ${displayName}.`);
+  }
+
+  const realPath = realpathSync(resolvedPath);
+
+  if (!statSync(realPath).isFile()) {
+    throw new UsageError(`Health metric CSV path must point to a regular file: ${displayName}.`);
+  }
+
+  if (path.extname(realPath).toLowerCase() !== ".csv") {
+    throw new UsageError("Health metric CSV file must use a .csv extension.");
+  }
+
+  if (hasCompassHealthPathSegment(realPath)) {
+    throw new UsageError("Health metric CSV must not be read from compass-health files.");
+  }
+
+  return {
+    csvText: readFileSync(realPath, "utf8"),
+    sourceFilename: path.basename(realPath)
+  };
+}
+
+function hasCompassHealthPathSegment(filePath: string): boolean {
+  return filePath
+    .split(/[\\/]+/)
+    .some((segment) => segment.toLowerCase().startsWith("compass-health"));
 }
 
 function parseUnitNumber(value: string, optionName: string): number {

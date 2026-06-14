@@ -1,4 +1,4 @@
-export type ApiMethod = "GET" | "POST";
+export type ApiMethod = "GET" | "POST" | "PATCH";
 
 export type ApiAuthMode = "bearer" | "public_read";
 
@@ -32,7 +32,11 @@ export const API_ROUTE_IDS = [
   "application.grade",
   "review.due",
   "review.attempt",
-  "wiki.pages"
+  "wiki.pages",
+  "health.metrics.create",
+  "health.metrics.list",
+  "health.metrics.update",
+  "health.metrics.import"
 ] as const;
 
 export type ApiRouteId = (typeof API_ROUTE_IDS)[number];
@@ -122,6 +126,34 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/wiki/pages?visibility=...",
     auth: "public_read",
     description: "List wiki pages; public visibility is readable without a bearer token."
+  },
+  {
+    id: "health.metrics.create",
+    method: "POST",
+    path: "/api/health/metrics",
+    auth: "bearer",
+    description: "Create one manual health metric observation."
+  },
+  {
+    id: "health.metrics.list",
+    method: "GET",
+    path: "/api/health/metrics?metric=...",
+    auth: "bearer",
+    description: "List health metric observations by metric and optional date window."
+  },
+  {
+    id: "health.metrics.update",
+    method: "PATCH",
+    path: "/api/health/metrics",
+    auth: "bearer",
+    description: "Update one health metric observation by id with an audit reason."
+  },
+  {
+    id: "health.metrics.import",
+    method: "POST",
+    path: "/api/health/metrics/import",
+    auth: "bearer",
+    description: "Import health metric observations from CSV text."
   }
 ] as const satisfies readonly ApiRouteManifestEntry[];
 
@@ -241,6 +273,16 @@ function routeMatchesPath(route: ApiRouteManifestEntry, path: string): boolean {
     return url?.pathname === "/api/review/due" && typeof target === "string" && target.length > 0;
   }
 
+  if (route.id === "health.metrics.list") {
+    if (!isLocalApiPathString(path)) {
+      return false;
+    }
+
+    const url = parseApiPath(path);
+
+    return url?.pathname === "/api/health/metrics";
+  }
+
   return false;
 }
 
@@ -250,6 +292,10 @@ function parseApiPath(path: string): URL | undefined {
   } catch {
     return undefined;
   }
+}
+
+function isLocalApiPathString(path: string): boolean {
+  return path.startsWith("/") && !path.startsWith("//");
 }
 
 function getSingleHeaderValue(headers: ApiRequestHeaders, expectedName: string): string | undefined {

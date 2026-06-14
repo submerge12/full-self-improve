@@ -24,12 +24,16 @@ const expectedRoutes = [
   { id: "application.grade", method: "POST", path: "/api/application/grade", auth: "bearer" },
   { id: "review.due", method: "GET", path: "/api/review/due?target=...", auth: "bearer" },
   { id: "review.attempt", method: "POST", path: "/api/review/attempt", auth: "bearer" },
-  { id: "wiki.pages", method: "GET", path: "/api/wiki/pages?visibility=...", auth: "public_read" }
+  { id: "wiki.pages", method: "GET", path: "/api/wiki/pages?visibility=...", auth: "public_read" },
+  { id: "health.metrics.create", method: "POST", path: "/api/health/metrics", auth: "bearer" },
+  { id: "health.metrics.list", method: "GET", path: "/api/health/metrics?metric=...", auth: "bearer" },
+  { id: "health.metrics.update", method: "PATCH", path: "/api/health/metrics", auth: "bearer" },
+  { id: "health.metrics.import", method: "POST", path: "/api/health/metrics/import", auth: "bearer" }
 ] as const;
 
 describe("API route manifest", () => {
   test("contains exactly the documented API endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(11);
+    expect(API_ROUTE_MANIFEST).toHaveLength(15);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -44,11 +48,11 @@ describe("API route manifest", () => {
     }
   });
 
-  test("requires bearer auth for every POST route", () => {
-    const postRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST");
+  test("requires bearer auth for every mutation route", () => {
+    const mutationRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST" || route.method === "PATCH");
 
-    expect(postRoutes).toHaveLength(7);
-    expect(postRoutes.every((route) => route.auth === "bearer")).toBe(true);
+    expect(mutationRoutes).toHaveLength(10);
+    expect(mutationRoutes.every((route) => route.auth === "bearer")).toBe(true);
   });
 
   test("findApiRoute returns a matching route and is method-sensitive", () => {
@@ -74,6 +78,20 @@ describe("API route manifest", () => {
     expect(findApiRoute("POST", "/api/review/due?target=2026-06-14")).toBeUndefined();
     expect(findApiRoute("GET", "/api/review/due")).toBeUndefined();
     expect(findApiRoute("GET", "/api/review/due?target=")).toBeUndefined();
+
+    expect(findApiRoute("POST", "/api/health/metrics")?.id).toBe("health.metrics.create");
+    expect(findApiRoute("POST", "/api/health/metrics?metric=weight")).toBeUndefined();
+    expect(findApiRoute("GET", "/api/health/metrics?metric=weight&from=2026-06-14&to=2026-06-15")?.id).toBe(
+      "health.metrics.list"
+    );
+    expect(findApiRoute("GET", "/api/health/metrics?from=bad-date")?.id).toBe("health.metrics.list");
+    expect(findApiRoute("GET", "api/health/metrics?metric=weight")).toBeUndefined();
+    expect(findApiRoute("GET", "https://evil.test/api/health/metrics?metric=weight")).toBeUndefined();
+    expect(findApiRoute("GET", "//evil.test/api/health/metrics?metric=weight")).toBeUndefined();
+    expect(findApiRoute("PATCH", "/api/health/metrics")?.id).toBe("health.metrics.update");
+    expect(findApiRoute("PATCH", "/api/health/metrics/1")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/metrics/import")?.id).toBe("health.metrics.import");
+    expect(findApiRoute("GET", "/api/health/metrics/import")).toBeUndefined();
   });
 });
 

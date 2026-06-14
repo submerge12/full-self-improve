@@ -14,6 +14,7 @@ import {
   __routeAdapterInternals,
   createRuntimeApiContext,
   handleWebApiRequest,
+  type AppRouteHandler,
   type RuntimeApiContextFactory
 } from "./route-adapter.js";
 import { POST as ingestRunPost, runtime as ingestRunRuntime } from "../ingest/run/route.js";
@@ -169,6 +170,15 @@ describe("Next app route adapter", () => {
     expect(wikiPagesGet).toEqual(expect.any(Function));
   });
 
+  test("actual health route modules export the expected HTTP method functions", async () => {
+    const { metrics, metricsImport } = await importHealthRouteModules();
+
+    expect(metrics.POST).toEqual(expect.any(Function));
+    expect(metrics.GET).toEqual(expect.any(Function));
+    expect(metrics.PATCH).toEqual(expect.any(Function));
+    expect(metricsImport.POST).toEqual(expect.any(Function));
+  });
+
   test("actual route modules force the Node.js runtime", () => {
     expect(ingestRunRuntime).toBe("nodejs");
     expect(planTodayRuntime).toBe("nodejs");
@@ -181,6 +191,13 @@ describe("Next app route adapter", () => {
     expect(reviewDueRuntime).toBe("nodejs");
     expect(reviewAttemptRuntime).toBe("nodejs");
     expect(wikiPagesRuntime).toBe("nodejs");
+  });
+
+  test("actual health route modules force the Node.js runtime", async () => {
+    const { metrics, metricsImport } = await importHealthRouteModules();
+
+    expect(metrics.runtime).toBe("nodejs");
+    expect(metricsImport.runtime).toBe("nodejs");
   });
 
   test("actual protected route modules accept bearer-authenticated Web requests", async () => {
@@ -284,6 +301,61 @@ describe("Next app route adapter", () => {
     ]);
   });
 
+  test("actual health route modules accept bearer-authenticated Web requests", async () => {
+    const { metrics, metricsImport } = await importHealthRouteModules();
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-health-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const createResponse = await metrics.POST(
+      jsonRequest("https://example.test/api/health/metrics", {
+        metricKey: "Weight",
+        metricLabel: "Weight",
+        value: 58.2,
+        unit: "kg",
+        observedAt: "2026-06-14T08:00:00.000Z"
+      })
+    );
+    const createBody = (await createResponse.clone().json()) as {
+      data: { result: { metric: { id: number } } };
+    };
+    const listResponse = await metrics.GET(
+      new Request("https://example.test/api/health/metrics?metric=weight&from=2026-06-14&to=2026-06-14", {
+        headers: { authorization: "Bearer env-secret" }
+      })
+    );
+    const updateResponse = await metrics.PATCH(
+      jsonRequest(
+        "https://example.test/api/health/metrics",
+        {
+          id: createBody.data.result.metric.id,
+          value: 58.0,
+          reason: "corrected morning reading"
+        },
+        "PATCH"
+      )
+    );
+    const importResponse = await metricsImport.POST(
+      jsonRequest("https://example.test/api/health/metrics/import", {
+        sourceFilename: "metrics.csv",
+        csvText: [
+          "metric_key,metric_label,value,unit,observed_at,source,note",
+          "sleep,Sleep,7.5,h,2026-06-14T22:00:00.000Z,csv,night"
+        ].join("\n")
+      })
+    );
+    const responses = [createResponse, listResponse, updateResponse, importResponse];
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200]);
+    await expectResponseRouteIds(responses, [
+      "health.metrics.create",
+      "health.metrics.list",
+      "health.metrics.update",
+      "health.metrics.import"
+    ]);
+  });
+
   test("actual protected route modules reject missing configured bearer tokens before body handling", async () => {
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-config-${Date.now()}.db`);
     tempFiles.push(dbPath);
@@ -325,6 +397,7 @@ describe("Next app route adapter", () => {
   });
 
   test("actual mutation route modules reject unauthenticated Web requests before body handling", async () => {
+    const { metrics, metricsImport } = await importHealthRouteModules();
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-mutations-${Date.now()}.db`);
     tempFiles.push(dbPath);
     process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
@@ -341,11 +414,23 @@ describe("Next app route adapter", () => {
         url: "https://example.test/api/application/task"
       },
       { routeId: "application.grade", handler: applicationGradePost, url: "https://example.test/api/application/grade" },
-      { routeId: "review.attempt", handler: reviewAttemptPost, url: "https://example.test/api/review/attempt" }
+      { routeId: "review.attempt", handler: reviewAttemptPost, url: "https://example.test/api/review/attempt" },
+      { routeId: "health.metrics.create", handler: metrics.POST, url: "https://example.test/api/health/metrics" },
+      {
+        routeId: "health.metrics.update",
+        handler: metrics.PATCH,
+        url: "https://example.test/api/health/metrics",
+        method: "PATCH"
+      },
+      {
+        routeId: "health.metrics.import",
+        handler: metricsImport.POST,
+        url: "https://example.test/api/health/metrics/import"
+      }
     ] as const;
 
     for (const route of mutationRoutes) {
-      const response = await route.handler(new Request(route.url, { method: "POST" }));
+      const response = await route.handler(new Request(route.url, { method: "method" in route ? route.method : "POST" }));
 
       expect(response.status).toBe(401);
       expect(await response.json()).toMatchObject({
@@ -602,9 +687,9 @@ function seedAuthenticatedRouteData(dbPath: string): void {
   }
 }
 
-function jsonRequest(url: string, body: Record<string, unknown>): Request {
+function jsonRequest(url: string, body: Record<string, unknown>, method = "POST"): Request {
   return new Request(url, {
-    method: "POST",
+    method,
     headers: {
       authorization: "Bearer env-secret",
       "content-type": "application/json"
@@ -617,4 +702,26 @@ async function expectResponseRouteIds(responses: readonly Response[], routeIds: 
   const bodies = await Promise.all(responses.map((response) => response.json() as Promise<{ routeId?: string }>));
 
   expect(bodies.map((body) => body.routeId)).toEqual(routeIds);
+}
+
+interface HealthRouteModule {
+  readonly runtime: string;
+  readonly GET: AppRouteHandler;
+  readonly POST: AppRouteHandler;
+  readonly PATCH: AppRouteHandler;
+}
+
+interface HealthImportRouteModule {
+  readonly runtime: string;
+  readonly POST: AppRouteHandler;
+}
+
+async function importHealthRouteModules(): Promise<{
+  readonly metrics: HealthRouteModule;
+  readonly metricsImport: HealthImportRouteModule;
+}> {
+  const metrics = (await import("../health/metrics/route.js")) as HealthRouteModule;
+  const metricsImport = (await import("../health/metrics/import/route.js")) as HealthImportRouteModule;
+
+  return { metrics, metricsImport };
 }

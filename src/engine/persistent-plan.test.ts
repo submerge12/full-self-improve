@@ -303,7 +303,7 @@ describe("persistent daily planner", () => {
     ]);
   });
 
-  test("includes due review activities before new learning activities", () => {
+  test("includes due review and application activities before new learning activities", () => {
     const review = createConcept(db, { slug: "review-me", name: "Review Me", status: "reviewed" });
     createConcept(db, { slug: "learn-me", name: "Learn Me", status: "generated" });
     recordMasteryUpdate(db, {
@@ -321,11 +321,12 @@ describe("persistent daily planner", () => {
 
     const plan = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
 
-    expect(plan.queue.map(({ order, type, conceptSlug }) => ({ order, type, conceptSlug }))).toEqual([
-      { order: 1, type: "review", conceptSlug: "review-me" },
-      { order: 2, type: "learn", conceptSlug: "learn-me" },
-      { order: 3, type: "quiz", conceptSlug: "learn-me" },
-      { order: 4, type: "teachback", conceptSlug: "learn-me" }
+    expect(plan.queue.map(({ id, order, type, conceptSlug }) => ({ id, order, type, conceptSlug }))).toEqual([
+      { id: "2026-06-14-review-review-me", order: 1, type: "review", conceptSlug: "review-me" },
+      { id: "2026-06-14-application-review-me", order: 2, type: "application", conceptSlug: "review-me" },
+      { id: "2026-06-14-learn-learn-me", order: 3, type: "learn", conceptSlug: "learn-me" },
+      { id: "2026-06-14-quiz-learn-me", order: 4, type: "quiz", conceptSlug: "learn-me" },
+      { id: "2026-06-14-teachback-learn-me", order: 5, type: "teachback", conceptSlug: "learn-me" }
     ]);
   });
 
@@ -347,7 +348,7 @@ describe("persistent daily planner", () => {
 
     const plan = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
 
-    expect(plan.queue.some((activity) => activity.type === "review")).toBe(false);
+    expect(plan.queue.some((activity) => activity.type === "review" || activity.type === "application")).toBe(false);
     expect(learnSlugs(plan)).toEqual(["learn-now"]);
   });
 
@@ -370,10 +371,10 @@ describe("persistent daily planner", () => {
     const reused = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
 
     expect(reused.queue).toEqual(first.queue);
-    expect(reused.queue.some((activity) => activity.type === "review")).toBe(false);
+    expect(reused.queue.some((activity) => activity.type === "review" || activity.type === "application")).toBe(false);
   });
 
-  test("force regenerates and picks up newly due reviews", () => {
+  test("force regenerates and picks up newly due reviews and application activities", () => {
     const review = createConcept(db, { slug: "forced-review", name: "Forced Review", status: "reviewed" });
     recordMasteryUpdate(db, {
       conceptId: review.id,
@@ -398,6 +399,44 @@ describe("persistent daily planner", () => {
         type: "review",
         conceptSlug: "forced-review",
         conceptName: "Forced Review"
+      },
+      {
+        id: "2026-06-14-application-forced-review",
+        order: 2,
+        type: "application",
+        conceptSlug: "forced-review",
+        conceptName: "Forced Review"
+      }
+    ]);
+  });
+
+  test("parses stored application activity type", () => {
+    db.prepare(
+      `INSERT INTO study_plans (date, queue, rationale, status)
+       VALUES (?, ?, ?, 'planned')`
+    ).run(
+      "2026-06-24",
+      JSON.stringify([
+        {
+          id: "2026-06-24-application-algebra",
+          order: 1,
+          type: "application",
+          conceptSlug: "algebra",
+          conceptName: "Algebra"
+        }
+      ]),
+      "Stored application queue"
+    );
+
+    const reused = createPersistentDailyPlan(db, { date: "2026-06-24" });
+
+    expect(reused.queue).toEqual([
+      {
+        id: "2026-06-24-application-algebra",
+        order: 1,
+        type: "application",
+        conceptSlug: "algebra",
+        conceptName: "Algebra"
       }
     ]);
   });
@@ -433,13 +472,30 @@ describe("persistent daily planner", () => {
     ]);
   });
 
-  test("rejects malformed stored plan activities", () => {
+  test("rejects malformed stored plan activities and illegal activity types", () => {
     db.prepare(
       `INSERT INTO study_plans (date, queue, rationale, status)
        VALUES (?, ?, ?, 'planned')`
     ).run("2026-06-21", JSON.stringify([null]), "Corrupt queue");
+    db.prepare(
+      `INSERT INTO study_plans (date, queue, rationale, status)
+       VALUES (?, ?, ?, 'planned')`
+    ).run(
+      "2026-06-25",
+      JSON.stringify([
+        {
+          id: "2026-06-25-practice-algebra",
+          order: 1,
+          type: "practice",
+          conceptSlug: "algebra",
+          conceptName: "Algebra"
+        }
+      ]),
+      "Illegal queue"
+    );
 
     expect(() => createPersistentDailyPlan(db, { date: "2026-06-21" })).toThrow(/activity 1 is not an object/);
+    expect(() => createPersistentDailyPlan(db, { date: "2026-06-25" })).toThrow(/activity 1 has invalid type/);
   });
 
   function countStudyPlans(): number {

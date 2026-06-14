@@ -77,7 +77,10 @@ export function createPersistentDailyPlan(
       date,
       edges: selectEligiblePrerequisiteEdges(db, threshold)
     });
-    const queue = renumberActivities([...reviewActivitiesForDate(date, listDuePersistentReviews(db, { target: date })), ...draft.queue]);
+    const queue = renumberActivities([
+      ...reviewApplicationActivitiesForDate(date, listDuePersistentReviews(db, { target: date })),
+      ...draft.queue
+    ]);
     const rationale = withReviewRationale(draft.rationale, queue);
 
     const outcome = existing === undefined ? "created" : "regenerated";
@@ -187,14 +190,30 @@ function upsertStudyPlan(db: Database.Database, date: string, queue: DailyPlanAc
   ).run(date, JSON.stringify(queue), rationale);
 }
 
-function reviewActivitiesForDate(date: string, reviews: PersistentReviewRecord[]): DailyPlanActivity[] {
-  return reviews.map((review, index) => ({
-    id: `${date}-review-${review.conceptSlug}`,
-    order: index + 1,
-    type: "review",
+function reviewApplicationActivitiesForDate(date: string, reviews: PersistentReviewRecord[]): DailyPlanActivity[] {
+  const activities: DailyPlanActivity[] = [];
+
+  for (const review of reviews) {
+    activities.push(createReviewApplicationActivity(date, review, "review", activities.length + 1));
+    activities.push(createReviewApplicationActivity(date, review, "application", activities.length + 1));
+  }
+
+  return activities;
+}
+
+function createReviewApplicationActivity(
+  date: string,
+  review: PersistentReviewRecord,
+  type: "review" | "application",
+  order: number
+): DailyPlanActivity {
+  return {
+    id: `${date}-${type}-${review.conceptSlug}`,
+    order,
+    type,
     conceptSlug: review.conceptSlug,
     conceptName: review.conceptName
-  }));
+  };
 }
 
 function renumberActivities(queue: DailyPlanActivity[]): DailyPlanActivity[] {
@@ -210,7 +229,7 @@ function withReviewRationale(rationale: string, queue: DailyPlanActivity[]): str
     return rationale;
   }
 
-  return `Persistent plan includes ${reviewCount} due review activities before new learning. ${rationale}`;
+  return `Persistent plan includes ${reviewCount} due review/application pairs before new learning. ${rationale}`;
 }
 
 function getStudyPlanByDate(db: Database.Database, date: string): StudyPlanRow | undefined {
@@ -285,7 +304,7 @@ function parseRequiredString(value: unknown, date: string, index: number, field:
 }
 
 function isPlanActivityType(value: unknown): value is PlanActivityType {
-  return value === "learn" || value === "quiz" || value === "teachback" || value === "review";
+  return value === "learn" || value === "quiz" || value === "teachback" || value === "review" || value === "application";
 }
 
 function createTraceContext(runId: string, recorder: TraceRecorder | undefined, date: string): TraceContext {

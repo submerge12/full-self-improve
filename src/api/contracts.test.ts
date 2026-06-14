@@ -22,12 +22,14 @@ const expectedRoutes = [
   { id: "teachback.submit", method: "POST", path: "/api/teachback", auth: "bearer" },
   { id: "application.task.create", method: "POST", path: "/api/application/task", auth: "bearer" },
   { id: "application.grade", method: "POST", path: "/api/application/grade", auth: "bearer" },
+  { id: "review.due", method: "GET", path: "/api/review/due?target=...", auth: "bearer" },
+  { id: "review.attempt", method: "POST", path: "/api/review/attempt", auth: "bearer" },
   { id: "wiki.pages", method: "GET", path: "/api/wiki/pages?visibility=...", auth: "public_read" }
 ] as const;
 
 describe("API route manifest", () => {
   test("contains exactly the documented API endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(9);
+    expect(API_ROUTE_MANIFEST).toHaveLength(11);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -45,7 +47,7 @@ describe("API route manifest", () => {
   test("requires bearer auth for every POST route", () => {
     const postRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST");
 
-    expect(postRoutes).toHaveLength(6);
+    expect(postRoutes).toHaveLength(7);
     expect(postRoutes.every((route) => route.auth === "bearer")).toBe(true);
   });
 
@@ -66,6 +68,12 @@ describe("API route manifest", () => {
     expect(findApiRoute("GET", "/api/wiki/pages?visibility=...")?.id).toBe("wiki.pages");
     expect(findApiRoute("POST", "/api/wiki/pages?visibility=public")).toBeUndefined();
     expect(findApiRoute("GET", "/api/wiki/pages?visibility=private")).toBeUndefined();
+
+    expect(findApiRoute("GET", "/api/review/due?target=2026-06-14")?.id).toBe("review.due");
+    expect(findApiRoute("GET", "/api/review/due?target=2026-06-14&limit=2")?.id).toBe("review.due");
+    expect(findApiRoute("POST", "/api/review/due?target=2026-06-14")).toBeUndefined();
+    expect(findApiRoute("GET", "/api/review/due")).toBeUndefined();
+    expect(findApiRoute("GET", "/api/review/due?target=")).toBeUndefined();
   });
 });
 

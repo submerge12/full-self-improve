@@ -5,6 +5,7 @@ import { createPage, createSourceWithChunk, recordMasteryUpdate } from "../db/co
 import { createConcept } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents } from "../db/trace-store.js";
+import { upsertPersistentReviewSchedule } from "../engine/persistent-review.js";
 import type { DocRef, RawDoc, SourceAdapter } from "../engine/source-adapter.js";
 import type { ApiRouteId } from "./contracts.js";
 import { handleApiRequest, type ApiHandlerContext, type ApiRequest } from "./handlers.js";
@@ -546,6 +547,190 @@ describe("pure API request handlers", () => {
     expect(countRows("trace_events")).toBe(baseline.traceEvents);
   });
 
+  test("GET review due returns seeded due reviews with optional limit and no trace persistence", async () => {
+    seedReviewSchedule("beta", "Beta", "2026-06-13T23:00:00.000Z", { card: "beta" });
+    seedReviewSchedule("alpha", "Alpha", "2026-06-14T10:00:00.000Z", { card: "alpha" });
+    seedReviewSchedule("future", "Future", "2026-06-15T00:00:00.000Z", { card: "future" });
+
+    const response = await handleApiRequest(authRequest("GET", "/api/review/due?target=2026-06-14"), context());
+    const limited = await handleApiRequest(
+      authRequest("GET", "/api/review/due?target=2026-06-14&limit=1"),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "review.due" });
+    const data = responseData<ReviewDueData>(response);
+    expect(data.target).toBe("2026-06-14");
+    expect(data.reviews.map((review) => review.conceptSlug)).toEqual(["beta", "alpha"]);
+    expect(data.reviews.map((review) => review.fsrsState)).toEqual([{ card: "beta" }, { card: "alpha" }]);
+    expect(responseData<ReviewDueData>(limited).reviews.map((review) => review.conceptSlug)).toEqual(["beta"]);
+    expect(countRows("trace_events")).toBe(0);
+  });
+
+  test.each([
+    ["missing target", "/api/review/due"],
+    ["empty target", "/api/review/due?target="],
+    ["blank target", "/api/review/due?target=+"],
+    ["zero limit", "/api/review/due?target=2026-06-14&limit=0"],
+    ["negative limit", "/api/review/due?target=2026-06-14&limit=-1"],
+    ["decimal limit", "/api/review/due?target=2026-06-14&limit=1.5"],
+    ["blank limit", "/api/review/due?target=2026-06-14&limit="],
+    ["non-numeric limit", "/api/review/due?target=2026-06-14&limit=abc"],
+    ["unsafe limit", "/api/review/due?target=2026-06-14&limit=9007199254740992"]
+  ])("GET review due returns 400 for malformed query: %s", async (_name, path) => {
+    const response = await handleApiRequest(authRequest("GET", path), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "review.due" }
+    });
+  });
+
+  test("POST review attempt updates review schedule and mastery and persists trace events", async () => {
+    seedReviewSchedule("spacing-effect", "Spacing Effect", "2026-06-13T00:00:00.000Z", {
+      reviewCount: 2,
+      lapses: 1
+    });
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/review/attempt", {
+        conceptSlug: "spacing-effect",
+        rating: "good",
+        reviewedAt: "2026-06-14T08:00:00+08:00"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "review.attempt" });
+    const data = responseData<ReviewAttemptData>(response);
+    expect(data.result).toMatchObject({
+      conceptSlug: "spacing-effect",
+      rating: "good",
+      reviewedAt: "2026-06-14T00:00:00.000Z",
+      previousDueAt: "2026-06-13T00:00:00.000Z",
+      nextDueAt: "2026-06-18T00:00:00.000Z",
+      mastery: {
+        score: 0.06,
+        confidence: 0.8,
+        attemptsN: 1,
+        lastSeenAt: "2026-06-14T00:00:00.000Z"
+      }
+    });
+    expect(readReviewSchedule("spacing-effect")).toMatchObject({
+      dueAt: "2026-06-18T00:00:00.000Z"
+    });
+    expect(listTraceEvents(db, { runId: data.result.runId }).map((event) => event.message)).toEqual([
+      "Review attempt recorded",
+      "Mastery updated"
+    ]);
+  });
+
+  test.each([
+    ["missing conceptSlug", { rating: "good", reviewedAt: "2026-06-14T00:00:00.000Z" }],
+    ["blank conceptSlug", { conceptSlug: "   ", rating: "good", reviewedAt: "2026-06-14T00:00:00.000Z" }],
+    ["invalid rating", { conceptSlug: "spacing-effect", rating: "later", reviewedAt: "2026-06-14T00:00:00.000Z" }],
+    ["missing reviewedAt", { conceptSlug: "spacing-effect", rating: "good" }],
+    ["blank reviewedAt", { conceptSlug: "spacing-effect", rating: "good", reviewedAt: "   " }],
+    ["invalid reviewedAt", { conceptSlug: "spacing-effect", rating: "good", reviewedAt: "2026-02-31" }]
+  ])("POST review attempt returns 400 for malformed body: %s", async (_name, body) => {
+    const response = await handleApiRequest(authRequest("POST", "/api/review/attempt", body), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "review.attempt" }
+    });
+  });
+
+  test("POST review attempt returns 400 for missing concept or missing review schedule", async () => {
+    createConcept(db, { slug: "no-schedule", name: "No Schedule", status: "generated" });
+    createConcept(db, { slug: "no schedule", name: "No Schedule With Space", status: "generated" });
+
+    const missingConcept = await handleApiRequest(
+      authRequest("POST", "/api/review/attempt", {
+        conceptSlug: "missing",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
+      }),
+      context()
+    );
+    const missingConceptWithSpace = await handleApiRequest(
+      authRequest("POST", "/api/review/attempt", {
+        conceptSlug: "missing concept",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
+      }),
+      context()
+    );
+    const missingSchedule = await handleApiRequest(
+      authRequest("POST", "/api/review/attempt", {
+        conceptSlug: "no-schedule",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
+      }),
+      context()
+    );
+    const missingScheduleWithSpace = await handleApiRequest(
+      authRequest("POST", "/api/review/attempt", {
+        conceptSlug: "no schedule",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
+      }),
+      context()
+    );
+
+    expect(missingConcept.status).toBe(400);
+    expect(missingConcept.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "review.attempt" }
+    });
+    expect(missingConceptWithSpace.status).toBe(400);
+    expect(missingConceptWithSpace.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "review.attempt" }
+    });
+    expect(missingSchedule.status).toBe(400);
+    expect(missingSchedule.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "review.attempt" }
+    });
+    expect(missingScheduleWithSpace.status).toBe(400);
+    expect(missingScheduleWithSpace.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "review.attempt" }
+    });
+  });
+
+  test("POST review attempt rolls back review and mastery changes when trace persistence fails", async () => {
+    seedReviewSchedule("spacing-effect", "Spacing Effect", "2026-06-13T00:00:00.000Z", {
+      reviewCount: 2,
+      lapses: 1
+    });
+    const baselineReview = readReviewSchedule("spacing-effect");
+    failTraceEventInserts();
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/review/attempt", {
+        conceptSlug: "spacing-effect",
+        rating: "good",
+        reviewedAt: "2026-06-14T00:00:00.000Z"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(500);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "unexpected_error", routeId: "review.attempt" }
+    });
+    expect(readReviewSchedule("spacing-effect")).toEqual(baselineReview);
+    expect(countRows("mastery")).toBe(0);
+    expect(countRows("trace_events")).toBe(0);
+  });
+
   test("GET mastery summary returns mastery rows and weak spots, and persists diagnose trace events", async () => {
     const concept = createConcept(db, { slug: "weak", name: "Weak", status: "generated" });
     recordMasteryUpdate(db, {
@@ -659,6 +844,20 @@ describe("pure API request handlers", () => {
     });
   }
 
+  function seedReviewSchedule(
+    slug: string,
+    name: string,
+    dueAt: string,
+    fsrsState: Record<string, unknown>
+  ): void {
+    const concept = createConcept(db, { slug, name, status: "generated" });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: concept.id,
+      fsrsState,
+      dueAt
+    });
+  }
+
   function countRows(table: string): number {
     return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
   }
@@ -691,6 +890,23 @@ describe("pure API request handlers", () => {
       difficulty: number;
       statement: string;
     }>;
+  }
+
+  function readReviewSchedule(slug: string): {
+    dueAt: string;
+    fsrsState: string;
+  } {
+    return db
+      .prepare(
+        `SELECT reviews.due_at AS dueAt, reviews.fsrs_state AS fsrsState
+         FROM reviews
+         INNER JOIN concepts ON concepts.id = reviews.concept_id
+         WHERE concepts.slug = ?`
+      )
+      .get(slug) as {
+      dueAt: string;
+      fsrsState: string;
+    };
   }
 
   function context(overrides: Partial<ApiHandlerContext> = {}): ApiHandlerContext {
@@ -774,6 +990,31 @@ interface MasterySummaryData extends Record<string, unknown> {
   diagnosis: {
     runId: string;
     weakSpots: unknown[];
+  };
+}
+
+interface ReviewDueData extends Record<string, unknown> {
+  target: string;
+  reviews: Array<{
+    conceptSlug: string;
+    fsrsState: Record<string, unknown>;
+  }>;
+}
+
+interface ReviewAttemptData extends Record<string, unknown> {
+  result: {
+    runId: string;
+    conceptSlug: string;
+    rating: string;
+    reviewedAt: string;
+    previousDueAt: string;
+    nextDueAt: string;
+    mastery: {
+      score: number;
+      confidence: number;
+      attemptsN: number;
+      lastSeenAt: string | null;
+    };
   };
 }
 

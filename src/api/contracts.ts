@@ -30,6 +30,8 @@ export const API_ROUTE_IDS = [
   "teachback.submit",
   "application.task.create",
   "application.grade",
+  "review.due",
+  "review.attempt",
   "wiki.pages"
 ] as const;
 
@@ -99,6 +101,20 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/application/grade",
     auth: "bearer",
     description: "Submit an application response for rubric grading."
+  },
+  {
+    id: "review.due",
+    method: "GET",
+    path: "/api/review/due?target=...",
+    auth: "bearer",
+    description: "List persistent reviews due on or before the target day."
+  },
+  {
+    id: "review.attempt",
+    method: "POST",
+    path: "/api/review/attempt",
+    auth: "bearer",
+    description: "Record a persistent review attempt and update mastery."
   },
   {
     id: "wiki.pages",
@@ -216,6 +232,13 @@ function routeMatchesPath(route: ApiRouteManifestEntry, path: string): boolean {
     const url = parseApiPath(path);
 
     return url?.pathname === "/api/wiki/pages" && url.searchParams.get("visibility") === "public";
+  }
+
+  if (route.id === "review.due") {
+    const url = parseApiPath(path);
+    const target = url?.searchParams.get("target");
+
+    return url?.pathname === "/api/review/due" && typeof target === "string" && target.length > 0;
   }
 
   return false;

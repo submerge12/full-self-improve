@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 
 import {
+  API_ROUTE_MANIFEST,
   ApiAuthConfigurationError,
   ApiAuthError,
   authorizeApiRequest,
@@ -19,6 +20,11 @@ import { diagnosePersistentWeakSpots } from "../engine/persistent-diagnose.js";
 import { runPersistentMockIngest } from "../engine/persistent-ingest.js";
 import { createPersistentDailyPlan } from "../engine/persistent-plan.js";
 import { gradePersistentExactQuizAttempt } from "../engine/persistent-quiz.js";
+import {
+  listDuePersistentReviews,
+  recordPersistentReviewAttempt,
+  type PersistentReviewRating
+} from "../engine/persistent-review.js";
 import { gradePersistentTeachback } from "../engine/persistent-teachback.js";
 import type { SourceAdapter } from "../engine/source-adapter.js";
 import type { TraceEvent } from "../engine/trace.js";
@@ -93,6 +99,17 @@ interface ApplicationGradeBody {
   response: string;
 }
 
+interface ReviewDueQuery {
+  target: string;
+  limit?: number;
+}
+
+interface ReviewAttemptBody {
+  conceptSlug: string;
+  rating: PersistentReviewRating;
+  reviewedAt: string;
+}
+
 class ApiBadRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -105,7 +122,7 @@ export async function handleApiRequest(
   request: ApiRequest,
   context: ApiHandlerContext
 ): Promise<ApiResponse<ApiHandlerResponseBody>> {
-  const route = findApiRoute(request.method, request.path);
+  const route = findApiRoute(request.method, request.path) ?? reviewDueRouteForMalformedQuery(request);
   if (route === undefined) {
     return errorResponse(404, "route_not_found", "API route was not found.");
   }
@@ -142,6 +159,10 @@ export async function handleApiRequest(
         return handleApplicationTaskCreate(request, context);
       case "application.grade":
         return handleApplicationGrade(request, context);
+      case "review.due":
+        return handleReviewDue(request, context);
+      case "review.attempt":
+        return handleReviewAttempt(request, context);
       case "wiki.pages":
         return successResponse("wiki.pages", { pages: listPublicPages(context.db) });
     }
@@ -247,6 +268,23 @@ function handleApplicationGrade(request: ApiRequest, context: ApiHandlerContext)
   return successResponse("application.grade", { result });
 }
 
+function handleReviewDue(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const query = parseReviewDueQuery(request.path);
+  const reviews = listDuePersistentReviews(context.db, {
+    target: query.target,
+    ...(query.limit === undefined ? {} : { limit: query.limit })
+  });
+
+  return successResponse("review.due", { target: query.target, reviews });
+}
+
+function handleReviewAttempt(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const body = parseReviewAttemptBody(request.body);
+  const result = runMutationWithTrace(context.db, () => recordPersistentReviewAttempt(context.db, body));
+
+  return successResponse("review.attempt", { result });
+}
+
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
   db: Database.Database,
   mutation: () => T
@@ -326,6 +364,32 @@ function parseApplicationGradeBody(body: unknown): ApplicationGradeBody {
   return {
     itemId: requiredPositiveInteger(record, "itemId"),
     response: requiredString(record, "response")
+  };
+}
+
+function parseReviewAttemptBody(body: unknown): ReviewAttemptBody {
+  const record = parseBodyRecord(body);
+
+  return {
+    conceptSlug: requiredString(record, "conceptSlug"),
+    rating: requiredReviewRating(record.rating),
+    reviewedAt: requiredString(record, "reviewedAt")
+  };
+}
+
+function parseReviewDueQuery(path: string): ReviewDueQuery {
+  const url = parseRequestPath(path);
+  const target = url.searchParams.get("target");
+  if (target === null || target.trim().length === 0) {
+    throw new ApiBadRequestError("Review due-list query parameter target must be a non-empty string.");
+  }
+
+  const limitValue = url.searchParams.get("limit");
+  const limit = limitValue === null ? undefined : parseQueryLimit(limitValue);
+
+  return {
+    target,
+    ...(limit === undefined ? {} : { limit })
   };
 }
 
@@ -430,12 +494,62 @@ function requiredPositiveInteger(record: Record<string, unknown>, field: string)
   return value;
 }
 
+function requiredReviewRating(value: unknown): PersistentReviewRating {
+  if (value === "again" || value === "hard" || value === "good" || value === "easy") {
+    return value;
+  }
+
+  throw new ApiBadRequestError("Request body field rating must be one of again, hard, good, or easy.");
+}
+
+function parseQueryLimit(value: string): number {
+  if (!/^[1-9]\d*$/.test(value)) {
+    throw new ApiBadRequestError("Review due-list query parameter limit must be a positive safe integer string.");
+  }
+
+  const limit = Number(value);
+  if (!Number.isSafeInteger(limit)) {
+    throw new ApiBadRequestError("Review due-list query parameter limit must be a positive safe integer string.");
+  }
+
+  return limit;
+}
+
 function adapterIdFromPath(path: string): string | undefined {
   try {
     const url = new URL(path, "https://knowledge-loop.local");
     const adapterId = url.searchParams.get("adapter");
 
     return adapterId === null || adapterId.length === 0 ? undefined : adapterId;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseRequestPath(path: string): URL {
+  try {
+    return new URL(path, "https://knowledge-loop.local");
+  } catch {
+    throw new ApiBadRequestError("Request path must be a valid API path.");
+  }
+}
+
+function reviewDueRouteForMalformedQuery(request: ApiRequest) {
+  if (request.method !== "GET") {
+    return undefined;
+  }
+
+  const url = parseMalformedRoutePath(request.path);
+  if (url?.pathname !== "/api/review/due") {
+    return undefined;
+  }
+
+  return API_ROUTE_MANIFEST.find((route) => route.id === "review.due");
+}
+
+function parseMalformedRoutePath(path: string): URL | undefined {
+  try {
+    return new URL(path, "https://knowledge-loop.local");
   } catch {
     return undefined;
   }
@@ -501,6 +615,10 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
       return isApplicationTaskInputError(error.message);
     case "application.grade":
       return isApplicationGradeInputError(error.message);
+    case "review.due":
+      return isReviewDueInputError(error.message);
+    case "review.attempt":
+      return isReviewAttemptInputError(error.message);
     default:
       return false;
   }
@@ -544,6 +662,29 @@ function isApplicationGradeInputError(message: string): boolean {
     message === "Persistent application grading requires a positive item id." ||
     message === "Persistent application grading requires a non-empty response."
   );
+}
+
+function isReviewDueInputError(message: string): boolean {
+  return /^Invalid review target/.test(message) || message === "limit must be a positive safe integer";
+}
+
+function isReviewAttemptInputError(message: string): boolean {
+  return (
+    isConceptNotFoundMessage(message) ||
+    isReviewScheduleMissingMessage(message) ||
+    message === "Persistent review attempt requires a non-empty conceptSlug." ||
+    message === "Persistent review rating must be one of again, hard, good, or easy." ||
+    message === "Persistent review attempt requires reviewedAt." ||
+    /^Invalid reviewedAt/.test(message)
+  );
+}
+
+function isConceptNotFoundMessage(message: string): boolean {
+  return message.startsWith("Concept ") && message.endsWith(" was not found.");
+}
+
+function isReviewScheduleMissingMessage(message: string): boolean {
+  return message.startsWith("Review schedule for concept ") && message.endsWith(" does not exist.");
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

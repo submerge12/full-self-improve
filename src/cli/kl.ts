@@ -60,6 +60,12 @@ import {
   diagnosePersistentWeakSpots,
   type PersistentDiagnoseResult
 } from "../engine/persistent-diagnose.js";
+import {
+  createPersistentApplicationTask,
+  gradePersistentApplicationAttempt,
+  type PersistentApplicationGradeResult,
+  type PersistentApplicationTaskResult
+} from "../engine/persistent-application.js";
 import { createRunId, TRACE_STAGES, type TraceEvent, type TraceStage } from "../engine/trace.js";
 import {
   createDailyPlan,
@@ -150,6 +156,14 @@ export interface KlPersistentTeachbackCommandResult {
 }
 
 export type KlTeachbackCommandResult = KlPersistentTeachbackCommandResult;
+
+export interface KlPersistentApplicationCommandResult {
+  command: "application";
+  mode: "mock-persistent";
+  result: PersistentApplicationTaskResult | PersistentApplicationGradeResult;
+}
+
+export type KlApplicationCommandResult = KlPersistentApplicationCommandResult;
 
 export interface KlPersistentDiagnoseCommandResult {
   command: "diagnose";
@@ -354,6 +368,7 @@ export type KlCommandResult =
   | KlPlanCommandResult
   | KlQuizCommandResult
   | KlTeachbackCommandResult
+  | KlApplicationCommandResult
   | KlDiagnoseCommandResult
   | KlTraceCommandResult
   | KlAgentCommandResult
@@ -397,6 +412,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runTraceCommand(args);
   }
 
+  if (command === "application") {
+    return runApplicationCommand(args);
+  }
+
   if (command === "agent") {
     return runAgentCommand(args);
   }
@@ -434,7 +453,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -678,6 +697,118 @@ function runTraceCommand(args: readonly string[]): KlTraceCommandResult {
   } finally {
     db.close();
   }
+}
+
+type ApplicationCliInput =
+  | {
+      mode: "create";
+      dbPath: string;
+      conceptSlug: string;
+      difficulty?: number;
+    }
+  | {
+      mode: "grade";
+      dbPath: string;
+      itemId: number;
+      response: string;
+    };
+
+function runApplicationCommand(args: readonly string[]): KlApplicationCommandResult {
+  const options = parseOptions(args, new Set(["--db", "--concept", "--difficulty", "--item", "--response"]), "application");
+  const input = parseApplicationInput(options);
+  const db = new Database(input.dbPath);
+
+  try {
+    applyMigrations(db);
+    const result = runPersistentApplication(db, input);
+    persistCommandTraceEvents(db, result);
+    return {
+      command: "application",
+      mode: "mock-persistent",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runPersistentApplication(
+  db: Database.Database,
+  input: ApplicationCliInput
+): PersistentApplicationTaskResult | PersistentApplicationGradeResult {
+  if (input.mode === "create") {
+    return createPersistentApplicationTask(db, {
+      conceptSlug: input.conceptSlug,
+      ...(input.difficulty === undefined ? {} : { difficulty: input.difficulty }),
+      runId: createRunId("persistent-application")
+    });
+  }
+
+  return gradePersistentApplicationAttempt(db, {
+    itemId: input.itemId,
+    response: input.response,
+    runId: createRunId("persistent-application-attempt")
+  });
+}
+
+function parseApplicationInput(options: Map<string, string[]>): ApplicationCliInput {
+  const dbPath = requireOne(options, "--db", "application");
+  const hasCreateOptions = hasOption(options, "--concept") || hasOption(options, "--difficulty");
+  const hasGradeOptions = hasOption(options, "--item") || hasOption(options, "--response");
+
+  if (hasCreateOptions && hasGradeOptions) {
+    rejectMixedApplicationOptions(options);
+  }
+  if (hasCreateOptions) {
+    return parseApplicationCreateInput(dbPath, options);
+  }
+  if (hasGradeOptions) {
+    return parseApplicationGradeInput(dbPath, options);
+  }
+
+  throw new UsageError(
+    "Command application requires either create mode (--concept) or grade mode (--item and --response)."
+  );
+}
+
+function parseApplicationCreateInput(dbPath: string, options: Map<string, string[]>): ApplicationCliInput {
+  const difficultyValue = optionalOne(options, "--difficulty", "application");
+  const difficulty = difficultyValue === undefined ? undefined : parseApplicationDifficulty(difficultyValue);
+
+  return {
+    mode: "create",
+    dbPath,
+    conceptSlug: requireOne(options, "--concept", "application"),
+    ...(difficulty === undefined ? {} : { difficulty })
+  };
+}
+
+function parseApplicationGradeInput(dbPath: string, options: Map<string, string[]>): ApplicationCliInput {
+  const itemValues = options.get("--item") ?? [];
+  const responseValues = options.get("--response") ?? [];
+
+  if (itemValues.length !== 1 || responseValues.length !== 1) {
+    throw new UsageError("Command application grade mode requires exactly one --item and exactly one --response.");
+  }
+
+  return {
+    mode: "grade",
+    dbPath,
+    itemId: parsePositiveSafeInteger(itemValues[0] as string, "--item"),
+    response: responseValues[0] as string
+  };
+}
+
+function rejectMixedApplicationOptions(options: Map<string, string[]>): never {
+  if (hasOption(options, "--item") && hasOption(options, "--response")) {
+    throw new UsageError("Command application cannot mix grade options with create options.");
+  }
+
+  throw new UsageError("Command application cannot mix create options with grade options.");
+}
+
+function hasOption(options: Map<string, string[]>, name: string): boolean {
+  return (options.get(name) ?? []).length > 0;
 }
 
 function runAgentCommand(args: readonly string[]): KlAgentCommandResult {
@@ -1611,6 +1742,14 @@ function parsePositiveSafeInteger(value: string, optionName: string): number {
   }
 
   return parsed;
+}
+
+function parseApplicationDifficulty(value: string): number {
+  if (!/^[1-5]$/.test(value)) {
+    throw new UsageError(`Invalid --difficulty value "${value}". Expected a safe integer between 1 and 5.`);
+  }
+
+  return Number(value);
 }
 
 function parseHttpEndpointOption(value: string, optionName: string): string {

@@ -24,6 +24,7 @@ import {
   type KlAgentScheduleDryRunCommandResult,
   type KlAgentScheduleLiveCommandResult,
   type KlCommandResult,
+  type KlPersistentApplicationCommandResult,
   type KlPersistentQuizCommandResult,
   type KlPersistentTeachbackCommandResult
 } from "./kl.js";
@@ -384,6 +385,47 @@ function createTeachbackDb(input: {
   return dbPath;
 }
 
+function createApplicationDb(input: {
+  slug: string;
+  name: string;
+  pageMarkdown?: string;
+  chunkText?: string;
+  createPage?: boolean;
+}): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-application-db-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    const concept = createConcept(db, { slug: input.slug, name: input.name, status: "generated" });
+    const { chunk } = createSourceWithChunk(db, {
+      adapterId: "fixture",
+      docRef: `${input.slug}.md`,
+      title: `${input.name} notes`,
+      fingerprint: `fingerprint-${input.slug}`,
+      chunkText:
+        input.chunkText ??
+        "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback."
+    });
+
+    if (input.createPage ?? true) {
+      createPage(db, {
+        conceptId: concept.id,
+        version: 1,
+        markdown:
+          input.pageMarkdown ??
+          "Retrieval practice transfers knowledge into realistic planning scenarios with constraints and feedback.",
+        citationIds: [chunk.id],
+        visibility: "private"
+      });
+    }
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
 function createTraceDb(): string {
   const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-trace-db-"));
   const dbPath = path.join(dbDir, "knowledge-loop.db");
@@ -489,6 +531,74 @@ function readTeachbackRows(dbPath: string): Array<{
   }
 }
 
+function readApplicationRows(dbPath: string): {
+  items: Array<{
+    id: number;
+    conceptSlug: string;
+    conceptIds: number[];
+    type: string;
+    difficulty: number;
+    statement: string;
+    answerSpec: unknown;
+  }>;
+  attempts: Array<{ id: number; itemId: number; response: string; verdict: string; gradingMethod: string }>;
+  mastery: Array<{ conceptSlug: string; score: number; confidence: number; attemptsN: number }>;
+} {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    const items = db
+      .prepare(
+        `SELECT
+           items.id,
+           concepts.slug AS conceptSlug,
+           items.concept_ids AS conceptIds,
+           items.type,
+           items.difficulty,
+           items.statement,
+           items.answer_spec AS answerSpec
+         FROM items
+         INNER JOIN concepts ON concepts.id = items.concept_id
+         ORDER BY items.id`
+      )
+      .all() as Array<{
+      id: number;
+      conceptSlug: string;
+      conceptIds: string;
+      type: string;
+      difficulty: number;
+      statement: string;
+      answerSpec: string;
+    }>;
+    const attempts = db
+      .prepare(
+        `SELECT id, item_id AS itemId, response, verdict, grading_method AS gradingMethod
+         FROM attempts
+         ORDER BY id`
+      )
+      .all() as Array<{ id: number; itemId: number; response: string; verdict: string; gradingMethod: string }>;
+    const mastery = db
+      .prepare(
+        `SELECT concepts.slug AS conceptSlug, mastery.score, mastery.confidence, mastery.attempts_n AS attemptsN
+         FROM mastery
+         INNER JOIN concepts ON concepts.id = mastery.concept_id
+         ORDER BY mastery.id`
+      )
+      .all() as Array<{ conceptSlug: string; score: number; confidence: number; attemptsN: number }>;
+
+    return {
+      items: items.map((item) => ({
+        ...item,
+        conceptIds: JSON.parse(item.conceptIds) as number[],
+        answerSpec: JSON.parse(item.answerSpec) as unknown
+      })),
+      attempts,
+      mastery
+    };
+  } finally {
+    db.close();
+  }
+}
+
 function countMutableRows(dbPath: string): Record<CountableTable, number> {
   return {
     schema_migrations: countRows(dbPath, "schema_migrations"),
@@ -537,7 +647,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, application, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
   });
 
@@ -3738,6 +3848,209 @@ describe("kl CLI handler", () => {
         "1"
       ])
     ).rejects.toThrow(/Unknown option for teachback: --bogus/);
+  });
+
+  test("application with a db and concept creates a free-form task and persists plan trace events", async () => {
+    const dbPath = createApplicationDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      ["application", "--db", dbPath, "--concept", "retrieval-practice"],
+      { stdout: stdout.sink }
+    )) as KlPersistentApplicationCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result.command).toBe("application");
+    expect(result.mode).toBe("mock-persistent");
+    if (!("answerSpec" in result.result)) {
+      throw new Error("Expected persistent application task result.");
+    }
+    const taskResult = result.result;
+    expect(taskResult).toMatchObject({
+      conceptSlug: "retrieval-practice",
+      difficulty: 3,
+      answerSpec: {
+        type: "rubric",
+        kind: "application",
+        conceptSlug: "retrieval-practice"
+      }
+    });
+    expect(result.result.itemId).toBeGreaterThan(0);
+    expect(readApplicationRows(dbPath)).toMatchObject({
+      items: [
+        {
+          id: result.result.itemId,
+          conceptSlug: "retrieval-practice",
+          type: "free_form",
+          difficulty: 3,
+          statement: taskResult.statement,
+          answerSpec: taskResult.answerSpec
+        }
+      ],
+      attempts: [],
+      mastery: []
+    });
+
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, result.result.runId, result.result.traceEvents);
+    expect(trace.result.events).toHaveLength(1);
+    expect(trace.result.events[0]).toMatchObject({
+      runId: result.result.runId,
+      stage: "plan",
+      message: "Application task generated"
+    });
+  });
+
+  test("application with a db item and response grades an attempt and persists mastery plus grade trace events", async () => {
+    const dbPath = createApplicationDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+    const created = (await handleKlCommand([
+      "application",
+      "--db",
+      dbPath,
+      "--concept",
+      "retrieval-practice",
+      "--difficulty",
+      "4"
+    ])) as KlPersistentApplicationCommandResult;
+
+    const result = (await handleKlCommand([
+      "application",
+      "--db",
+      dbPath,
+      "--item",
+      String(created.result.itemId),
+      "--response",
+      "Retrieval practice uses transfer of knowledge in realistic planning scenarios with constraints and feedback."
+    ])) as KlPersistentApplicationCommandResult;
+
+    expect(result.command).toBe("application");
+    expect(result.mode).toBe("mock-persistent");
+    if (!("attemptId" in result.result)) {
+      throw new Error("Expected persistent application grade result.");
+    }
+    const gradeResult = result.result;
+    expect(gradeResult).toMatchObject({
+      itemId: created.result.itemId,
+      conceptSlug: "retrieval-practice",
+      verdict: "correct",
+      gradingMethod: "rubric",
+      masteryDelta: 0.12,
+      mastery: {
+        score: 0.12,
+        confidence: 0.85,
+        attemptsN: 1
+      }
+    });
+    expect(gradeResult.attemptId).toBeGreaterThan(0);
+    expect(readApplicationRows(dbPath)).toMatchObject({
+      items: [
+        {
+          id: created.result.itemId,
+          conceptSlug: "retrieval-practice",
+          type: "free_form",
+          difficulty: 4
+        }
+      ],
+      attempts: [
+        {
+          id: gradeResult.attemptId,
+          itemId: created.result.itemId,
+          response:
+            "Retrieval practice uses transfer of knowledge in realistic planning scenarios with constraints and feedback.",
+          verdict: "correct",
+          gradingMethod: "rubric"
+        }
+      ],
+      mastery: [
+        {
+          conceptSlug: "retrieval-practice",
+          score: 0.12,
+          confidence: 0.85,
+          attemptsN: 1
+        }
+      ]
+    });
+
+    const trace = await expectPersistedTraceEventsMatchResult(dbPath, gradeResult.runId, gradeResult.traceEvents);
+    expect(trace.result.events.map((event) => event.message)).toEqual(["Mastery updated", "Application attempt graded"]);
+    expect(trace.result.events.map((event) => event.stage)).toEqual(expect.arrayContaining(["grade"]));
+  });
+
+  test("application rejects missing and duplicate db plus missing or mixed mode options", async () => {
+    const dbPath = createApplicationDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["application", "--concept", "retrieval-practice"])).rejects.toThrow(
+      /Command application requires exactly one --db/
+    );
+    await expect(
+      handleKlCommand(["application", "--db", dbPath, "--db", otherDbPath, "--concept", "retrieval-practice"])
+    ).rejects.toThrow(/Command application requires exactly one --db/);
+    await expect(handleKlCommand(["application", "--db", dbPath])).rejects.toThrow(
+      /Command application requires either create mode \(--concept\) or grade mode \(--item and --response\)/
+    );
+    await expect(handleKlCommand(["application", "--db", dbPath, "--item", "1"])).rejects.toThrow(
+      /Command application grade mode requires exactly one --item and exactly one --response/
+    );
+    await expect(
+      handleKlCommand(["application", "--db", dbPath, "--concept", "retrieval-practice", "--response", "answer"])
+    ).rejects.toThrow(/Command application cannot mix create options with grade options/);
+    await expect(
+      handleKlCommand([
+        "application",
+        "--db",
+        dbPath,
+        "--item",
+        "1",
+        "--response",
+        "answer",
+        "--difficulty",
+        "2"
+      ])
+    ).rejects.toThrow(/Command application cannot mix grade options with create options/);
+  });
+
+  test("application rejects invalid values unknown options and missing pages without partial item writes", async () => {
+    const dbPath = createApplicationDb({ slug: "retrieval-practice", name: "Retrieval Practice" });
+    const missingPageDbPath = createApplicationDb({
+      slug: "no-page",
+      name: "No Page",
+      createPage: false
+    });
+
+    await expect(
+      handleKlCommand(["application", "--db", dbPath, "--item", "0", "--response", "answer"])
+    ).rejects.toThrow(/Invalid --item value "0"/);
+    await expect(
+      handleKlCommand(["application", "--db", dbPath, "--concept", "retrieval-practice", "--difficulty", "0"])
+    ).rejects.toThrow(/Invalid --difficulty value "0"/);
+    await expect(
+      handleKlCommand(["application", "--db", dbPath, "--concept", "retrieval-practice", "--bogus", "1"])
+    ).rejects.toThrow(/Unknown option for application: --bogus/);
+    await expect(
+      handleKlCommand(["application", "--db", missingPageDbPath, "--concept", "no-page"])
+    ).rejects.toThrow(/No page was found for concept no-page/);
+
+    expect(countRows(missingPageDbPath, "items")).toBe(0);
+    expect(countRows(missingPageDbPath, "attempts")).toBe(0);
+    expect(countRows(missingPageDbPath, "mastery")).toBe(0);
+  });
+
+  test("application rejects difficulty above five before creating a missing db", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-application-invalid-")), "missing.db");
+    const command = handleKlCommand([
+      "application",
+      "--db",
+      missingDbPath,
+      "--concept",
+      "retrieval-practice",
+      "--difficulty",
+      "6"
+    ]);
+
+    await expect(command).rejects.toThrow(/Invalid --difficulty value/);
+    await expect(command).rejects.toHaveProperty("exitCode", 2);
+
+    expect(existsSync(missingDbPath)).toBe(false);
   });
 
   test("diagnose with a db returns weak spots and writes JSON", async () => {

@@ -264,12 +264,12 @@ describe("agent HTTP clients", () => {
     expect(invalidJsonError.message).not.toContain(secret);
   });
 
-  test("board client posts action payloads to configured endpoints with redacted source endpoints", async () => {
+  test("board client posts create_task as a redacted Multica issue payload", async () => {
     const action: AgentIntendedAction = {
       target: "multica",
       type: "create_task",
-      title: "Scholar study plan for 2026-06-13",
-      body: "Study queue",
+      title: "Scholar study plan for secret-token",
+      body: "Study queue Authorization: Bearer secret-token",
       checklist: ["Review learn activities"],
       sourceEndpoints: ["GET http://127.0.0.1:3000/api/plan/today?api_key=secret-token"]
     };
@@ -296,13 +296,40 @@ describe("agent HTTP clients", () => {
       }
     });
     expect(payload).toEqual({
-      boardId: "daily-plan",
+      title: "Scholar study plan for REDACTED",
+      description: "Study queue Authorization: Bearer REDACTED",
+      status: "todo",
+      priority: "medium"
+    });
+    expect(JSON.stringify(payload)).not.toContain("secret-token");
+  });
+
+  test("board client posts add_comment as a redacted Multica comment payload", async () => {
+    const action: AgentIntendedAction = {
       target: "multica",
-      type: "create_task",
-      title: "Scholar study plan for 2026-06-13",
-      body: "Study queue",
-      checklist: ["Review learn activities"],
-      sourceEndpoints: ["GET http://127.0.0.1:3000/api/plan/today?api_key=REDACTED"]
+      type: "add_comment",
+      title: "Librarian ingest report",
+      body: "Counts token=secret-token",
+      checklist: ["Run ingest"],
+      sourceEndpoints: ["POST http://127.0.0.1:3000/api/ingest/run?token=secret-token"]
+    };
+    const spy = createSpyFetch([jsonResponse({ id: "comment-1" })]);
+    const client = createHttpBoardClient({
+      fetch: spy.fetch,
+      boardId: "daily-plan",
+      bearerToken: "secret-token",
+      createTaskEndpointUrl: "http://multica.local/api/tasks",
+      addCommentEndpointUrl: "http://multica.local/api/comments"
+    });
+
+    const result = await client.publish(action);
+    const payload = JSON.parse(String(spy.calls[0]?.init?.body));
+
+    expect(result).toEqual({ action, id: "comment-1" });
+    expect(spy.calls[0]?.input).toBe("http://multica.local/api/comments");
+    expect(payload).toEqual({
+      content: "Counts token=REDACTED",
+      type: "comment"
     });
     expect(JSON.stringify(payload)).not.toContain("secret-token");
   });

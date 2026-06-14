@@ -14,7 +14,7 @@ export interface BoardPublishConfigValidationResult {
 }
 
 export const BOARD_PUBLISH_CONFIG_LIVE_CLIENT_WARNING =
-  "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template.";
+  "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and built-in Multica issue/comment payloads rather than reading this config file.";
 
 interface BoardPublishConfig {
   readonly contractStatus: "inferred_live_smoke_pending";
@@ -31,6 +31,8 @@ interface BoardPublishConfig {
       readonly payload: {
         readonly title?: unknown;
         readonly description?: unknown;
+        readonly status?: unknown;
+        readonly priority?: unknown;
       };
     };
     readonly add_comment: {
@@ -38,6 +40,7 @@ interface BoardPublishConfig {
       readonly endpointTemplate: string;
       readonly payload: {
         readonly content?: unknown;
+        readonly type?: unknown;
       };
     };
   };
@@ -126,6 +129,18 @@ function validateActions(config: BoardPublishConfig, errors: string[]): void {
     if (createTask.payload.description !== "$action.body") {
       errors.push("board publish config actions.create_task.payload.description must be $action.body.");
     }
+    if (createTask.payload.status !== undefined && createTask.payload.status !== "todo") {
+      errors.push("board publish config actions.create_task.payload.status must be todo when present.");
+    }
+    if (
+      createTask.payload.priority !== undefined &&
+      (typeof createTask.payload.priority !== "string" ||
+        !["none", "low", "medium", "high", "urgent"].includes(createTask.payload.priority))
+    ) {
+      errors.push(
+        "board publish config actions.create_task.payload.priority must be one of none, low, medium, high, urgent when present."
+      );
+    }
   }
 
   if (addComment.method !== "POST") {
@@ -138,8 +153,13 @@ function validateActions(config: BoardPublishConfig, errors: string[]): void {
   }
   if (!isRecord(addComment.payload)) {
     errors.push("board publish config actions.add_comment.payload must be a JSON object.");
-  } else if (addComment.payload.content !== "$action.body") {
-    errors.push("board publish config actions.add_comment.payload.content must be $action.body.");
+  } else {
+    if (addComment.payload.content !== "$action.body") {
+      errors.push("board publish config actions.add_comment.payload.content must be $action.body.");
+    }
+    if (addComment.payload.type !== undefined && addComment.payload.type !== "comment") {
+      errors.push("board publish config actions.add_comment.payload.type must be comment when present.");
+    }
   }
 }
 

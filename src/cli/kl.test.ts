@@ -1805,7 +1805,7 @@ describe("kl CLI handler", () => {
         validation: {
           errors: [],
           warnings: [
-            "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
+            "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and built-in Multica issue/comment payloads rather than reading this config file."
           ],
           summary: {
             contractStatus: "inferred_live_smoke_pending",
@@ -1923,7 +1923,7 @@ describe("kl CLI handler", () => {
       expect(result.result.validation.summary).toBeUndefined();
       expect(result.result.validation.errors).toEqual(["Duplicate JSON key contractStatus."]);
       expect(result.result.validation.warnings).toEqual([
-        "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
+        "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and built-in Multica issue/comment payloads rather than reading this config file."
       ]);
     } finally {
       unlinkIfExists(configPath);
@@ -2065,7 +2065,7 @@ describe("kl CLI handler", () => {
       expect(result.result.validation.summary).toBeUndefined();
       expect(result.result.validation.errors).toEqual(expect.arrayContaining([expect.stringContaining("JSON")]));
       expect(result.result.validation.warnings).toEqual([
-        "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
+        "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and built-in Multica issue/comment payloads rather than reading this config file."
       ]);
     } finally {
       unlinkIfExists(configPath);

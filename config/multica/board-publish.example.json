@@ -14,7 +14,7 @@
         "title": "$action.title",
         "description": "$action.body",
         "status": "todo",
-        "priority": "normal"
+        "priority": "medium"
       }
     },
     "add_comment": {

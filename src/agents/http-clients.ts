@@ -138,7 +138,7 @@ async function publishAction(
     response = await options.fetch(endpointUrl, {
       method: "POST",
       headers: headersFor(options.bearerToken, "json"),
-      body: JSON.stringify(payloadFor(action, options, secrets))
+      body: JSON.stringify(payloadFor(action, secrets))
     });
   } catch (error) {
     throw new AgentHttpError(
@@ -184,17 +184,20 @@ function endpointUrlFor(action: AgentIntendedAction, options: HttpBoardClientOpt
 
 function payloadFor(
   action: AgentIntendedAction,
-  options: HttpBoardClientOptions,
   secrets: readonly string[]
 ): Record<string, unknown> {
+  if (action.type === "create_task") {
+    return {
+      title: redactText(action.title, secrets),
+      description: redactText(action.body, secrets),
+      status: "todo",
+      priority: "medium"
+    };
+  }
+
   return {
-    boardId: options.boardId,
-    target: action.target,
-    type: action.type,
-    title: redactText(action.title, secrets),
-    body: redactText(action.body, secrets),
-    checklist: action.checklist.map((item) => redactText(item, secrets)),
-    sourceEndpoints: action.sourceEndpoints.map((endpoint) => redactEndpointReference(endpoint, secrets))
+    content: redactText(action.body, secrets),
+    type: "comment"
   };
 }
 

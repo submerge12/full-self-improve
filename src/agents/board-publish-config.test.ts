@@ -6,6 +6,18 @@ import { describe, expect, test } from "vitest";
 import { validateBoardPublishConfig } from "./board-publish-config.js";
 
 const projectRoot = process.cwd();
+const liveClientWarning =
+  "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and built-in Multica issue/comment payloads rather than reading this config file.";
+
+interface BoardPublishConfigFixture {
+  readonly actions: {
+    readonly create_task: {
+      readonly payload: {
+        readonly priority?: unknown;
+      };
+    };
+  };
+}
 
 describe("M2 board publish config", () => {
   test("checked-in example defines the inferred Multica publish contract", async () => {
@@ -14,9 +26,7 @@ describe("M2 board publish config", () => {
     const result = validateBoardPublishConfig(config);
 
     expect(result.errors).toEqual([]);
-    expect(result.warnings).toEqual([
-      "board publish config is an offline candidate; agent-day --live currently uses explicit endpoint flags and the internal agent action payload rather than rendering this payload template."
-    ]);
+    expect(result.warnings).toEqual([liveClientWarning]);
     expect(result.summary).toEqual({
       contractStatus: "inferred_live_smoke_pending",
       apiBaseUrl: "http://127.0.0.1:8080",
@@ -25,6 +35,7 @@ describe("M2 board publish config", () => {
       actions: ["create_task", "add_comment"],
       commentRequiresIssueId: true
     });
+    expect((config as BoardPublishConfigFixture).actions.create_task.payload.priority).toBe("medium");
   });
 
   test("rejects secrets, filesystem paths, and non-http endpoints", () => {
@@ -104,6 +115,83 @@ describe("M2 board publish config", () => {
         "board publish config actions.create_task.payload.description must be $action.body.",
         "board publish config actions.add_comment.endpointTemplate must include {issueId}."
       ])
+    );
+  });
+
+  test("rejects unsupported Multica issue and comment payload constants", () => {
+    const result = validateBoardPublishConfig({
+      contractStatus: "inferred_live_smoke_pending",
+      apiBaseUrl: "http://127.0.0.1:8080",
+      appBaseUrl: "http://127.0.0.1:3000",
+      workspace: {
+        slug: "daily-plan",
+        id: ""
+      },
+      actions: {
+        create_task: {
+          method: "POST",
+          endpointUrl: "http://127.0.0.1:8080/api/issues",
+          payload: {
+            title: "$action.title",
+            description: "$action.body",
+            status: "doing",
+            priority: "normal"
+          }
+        },
+        add_comment: {
+          method: "POST",
+          endpointTemplate: "http://127.0.0.1:8080/api/issues/{issueId}/comments",
+          payload: {
+            content: "$action.body",
+            type: "status"
+          }
+        }
+      }
+    });
+
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        "board publish config actions.create_task.payload.status must be todo when present.",
+        "board publish config actions.create_task.payload.priority must be one of none, low, medium, high, urgent when present.",
+        "board publish config actions.add_comment.payload.type must be comment when present."
+      ])
+    );
+  });
+
+  test.each([
+    ["array priority", ["medium"]],
+    ["object priority", { value: "medium" }]
+  ])("rejects non-string create_task payload priority: %s", (_label, priority) => {
+    const result = validateBoardPublishConfig({
+      contractStatus: "inferred_live_smoke_pending",
+      apiBaseUrl: "http://127.0.0.1:8080",
+      appBaseUrl: "http://127.0.0.1:3000",
+      workspace: {
+        slug: "daily-plan",
+        id: ""
+      },
+      actions: {
+        create_task: {
+          method: "POST",
+          endpointUrl: "http://127.0.0.1:8080/api/issues",
+          payload: {
+            title: "$action.title",
+            description: "$action.body",
+            priority
+          }
+        },
+        add_comment: {
+          method: "POST",
+          endpointTemplate: "http://127.0.0.1:8080/api/issues/{issueId}/comments",
+          payload: {
+            content: "$action.body"
+          }
+        }
+      }
+    });
+
+    expect(result.errors).toContain(
+      "board publish config actions.create_task.payload.priority must be one of none, low, medium, high, urgent when present."
     );
   });
 });

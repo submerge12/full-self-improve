@@ -7,6 +7,7 @@ import {
   type PlanActivityType,
   type PlanConceptInput
 } from "./mock-commands.js";
+import { listDuePersistentReviews, type PersistentReviewRecord } from "./persistent-review.js";
 import { createTraceRecorder, type TraceEvent, type TraceRecorder } from "./trace.js";
 
 export type StudyPlanStatus = "planned" | "active" | "completed" | "skipped";
@@ -76,9 +77,11 @@ export function createPersistentDailyPlan(
       date,
       edges: selectEligiblePrerequisiteEdges(db, threshold)
     });
+    const queue = renumberActivities([...reviewActivitiesForDate(date, listDuePersistentReviews(db, { target: date })), ...draft.queue]);
+    const rationale = withReviewRationale(draft.rationale, queue);
 
     const outcome = existing === undefined ? "created" : "regenerated";
-    upsertStudyPlan(db, date, draft.queue, draft.rationale);
+    upsertStudyPlan(db, date, queue, rationale);
     const created = getStudyPlanByDate(db, date);
     if (created === undefined) {
       throw new Error(`Study plan ${date} was not found after upsert`);
@@ -184,6 +187,32 @@ function upsertStudyPlan(db: Database.Database, date: string, queue: DailyPlanAc
   ).run(date, JSON.stringify(queue), rationale);
 }
 
+function reviewActivitiesForDate(date: string, reviews: PersistentReviewRecord[]): DailyPlanActivity[] {
+  return reviews.map((review, index) => ({
+    id: `${date}-review-${review.conceptSlug}`,
+    order: index + 1,
+    type: "review",
+    conceptSlug: review.conceptSlug,
+    conceptName: review.conceptName
+  }));
+}
+
+function renumberActivities(queue: DailyPlanActivity[]): DailyPlanActivity[] {
+  return queue.map((activity, index) => ({
+    ...activity,
+    order: index + 1
+  }));
+}
+
+function withReviewRationale(rationale: string, queue: DailyPlanActivity[]): string {
+  const reviewCount = queue.filter((activity) => activity.type === "review").length;
+  if (reviewCount === 0) {
+    return rationale;
+  }
+
+  return `Persistent plan includes ${reviewCount} due review activities before new learning. ${rationale}`;
+}
+
 function getStudyPlanByDate(db: Database.Database, date: string): StudyPlanRow | undefined {
   return db
     .prepare(
@@ -256,7 +285,7 @@ function parseRequiredString(value: unknown, date: string, index: number, field:
 }
 
 function isPlanActivityType(value: unknown): value is PlanActivityType {
-  return value === "learn" || value === "quiz" || value === "teachback";
+  return value === "learn" || value === "quiz" || value === "teachback" || value === "review";
 }
 
 function createTraceContext(runId: string, recorder: TraceRecorder | undefined, date: string): TraceContext {

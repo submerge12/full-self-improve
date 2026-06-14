@@ -6,6 +6,7 @@ import { addConceptEdge, createConcept } from "../db/graph-store.js";
 import { applyMigrations } from "../db/migrations.js";
 import { createTraceRecorder } from "./trace.js";
 import { createPersistentDailyPlan } from "./persistent-plan.js";
+import { upsertPersistentReviewSchedule } from "./persistent-review.js";
 
 describe("persistent daily planner", () => {
   let db: Database.Database;
@@ -298,6 +299,136 @@ describe("persistent daily planner", () => {
           outcome: "regenerated",
           status: "planned"
         }
+      }
+    ]);
+  });
+
+  test("includes due review activities before new learning activities", () => {
+    const review = createConcept(db, { slug: "review-me", name: "Review Me", status: "reviewed" });
+    createConcept(db, { slug: "learn-me", name: "Learn Me", status: "generated" });
+    recordMasteryUpdate(db, {
+      conceptId: review.id,
+      score: 0.95,
+      confidence: 0.9,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-13T00:00:00.000Z"
+    });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: review.id,
+      fsrsState: { card: "review-me" },
+      dueAt: "2026-06-14T23:59:59.999Z"
+    });
+
+    const plan = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
+
+    expect(plan.queue.map(({ order, type, conceptSlug }) => ({ order, type, conceptSlug }))).toEqual([
+      { order: 1, type: "review", conceptSlug: "review-me" },
+      { order: 2, type: "learn", conceptSlug: "learn-me" },
+      { order: 3, type: "quiz", conceptSlug: "learn-me" },
+      { order: 4, type: "teachback", conceptSlug: "learn-me" }
+    ]);
+  });
+
+  test("excludes future review activities from today's plan", () => {
+    const review = createConcept(db, { slug: "future-review", name: "Future Review", status: "reviewed" });
+    createConcept(db, { slug: "learn-now", name: "Learn Now", status: "generated" });
+    recordMasteryUpdate(db, {
+      conceptId: review.id,
+      score: 0.95,
+      confidence: 0.9,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-13T00:00:00.000Z"
+    });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: review.id,
+      fsrsState: { card: "future-review" },
+      dueAt: "2026-06-15T00:00:00.000Z"
+    });
+
+    const plan = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
+
+    expect(plan.queue.some((activity) => activity.type === "review")).toBe(false);
+    expect(learnSlugs(plan)).toEqual(["learn-now"]);
+  });
+
+  test("reuses stored plan despite changed review state unless force is true", () => {
+    const review = createConcept(db, { slug: "changed-review", name: "Changed Review", status: "reviewed" });
+    recordMasteryUpdate(db, {
+      conceptId: review.id,
+      score: 0.95,
+      confidence: 0.9,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-13T00:00:00.000Z"
+    });
+    const first = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: review.id,
+      fsrsState: { card: "changed-review" },
+      dueAt: "2026-06-14T12:00:00.000Z"
+    });
+
+    const reused = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
+
+    expect(reused.queue).toEqual(first.queue);
+    expect(reused.queue.some((activity) => activity.type === "review")).toBe(false);
+  });
+
+  test("force regenerates and picks up newly due reviews", () => {
+    const review = createConcept(db, { slug: "forced-review", name: "Forced Review", status: "reviewed" });
+    recordMasteryUpdate(db, {
+      conceptId: review.id,
+      score: 0.95,
+      confidence: 0.9,
+      attemptsN: 3,
+      lastSeenAt: "2026-06-13T00:00:00.000Z"
+    });
+    createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8 });
+    upsertPersistentReviewSchedule(db, {
+      conceptId: review.id,
+      fsrsState: { card: "forced-review" },
+      dueAt: "2026-06-14T12:00:00.000Z"
+    });
+
+    const regenerated = createPersistentDailyPlan(db, { date: "2026-06-14", masteryThreshold: 0.8, force: true });
+
+    expect(regenerated.queue).toMatchObject([
+      {
+        id: "2026-06-14-review-forced-review",
+        order: 1,
+        type: "review",
+        conceptSlug: "forced-review",
+        conceptName: "Forced Review"
+      }
+    ]);
+  });
+
+  test("parses stored review activity type", () => {
+    db.prepare(
+      `INSERT INTO study_plans (date, queue, rationale, status)
+       VALUES (?, ?, ?, 'planned')`
+    ).run(
+      "2026-06-23",
+      JSON.stringify([
+        {
+          id: "2026-06-23-review-algebra",
+          order: 1,
+          type: "review",
+          conceptSlug: "algebra",
+          conceptName: "Algebra"
+        }
+      ]),
+      "Stored review queue"
+    );
+
+    const reused = createPersistentDailyPlan(db, { date: "2026-06-23" });
+
+    expect(reused.queue).toEqual([
+      {
+        id: "2026-06-23-review-algebra",
+        order: 1,
+        type: "review",
+        conceptSlug: "algebra",
+        conceptName: "Algebra"
       }
     ]);
   });

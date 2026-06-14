@@ -9,7 +9,7 @@ import {
 
 export type MockPageVisibility = "private" | "public";
 export type ConceptEdgeKind = "prerequisite" | "related" | "part_of";
-export type PlanActivityType = "learn" | "quiz" | "teachback";
+export type PlanActivityType = "learn" | "quiz" | "teachback" | "review";
 export type QuizVerdict = "correct" | "incorrect";
 
 export interface MockIngestOptions {

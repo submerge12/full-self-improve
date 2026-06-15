@@ -15,6 +15,10 @@
     "nutritionist": {
       "dryRun": true,
       "phases": ["daily-meals"]
+    },
+    "coach": {
+      "dryRun": true,
+      "phases": ["daily-health"]
     }
   }
 }

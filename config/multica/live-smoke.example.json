@@ -36,6 +36,14 @@
             "requiredBoardEvidence": ["taskUrl", "mealChecklist", "sourceLinks"]
           },
           {
+            "role": "coach",
+            "phase": "daily-health",
+            "actionType": "add_comment",
+            "title": "Coach health digest for 2026-06-14",
+            "requiredSourceEndpoints": ["POST http://127.0.0.1:3000/api/health/coach-digest/generate"],
+            "requiredBoardEvidence": ["commentUrl", "sourceLinks"]
+          },
+          {
             "role": "scholar",
             "phase": "evening-mastery",
             "actionType": "add_comment",
@@ -74,6 +82,14 @@
               "POST http://127.0.0.1:8000/api/meal-engine/procurement"
             ],
             "requiredBoardEvidence": ["taskUrl", "mealChecklist", "sourceLinks"]
+          },
+          {
+            "role": "coach",
+            "phase": "daily-health",
+            "actionType": "add_comment",
+            "title": "Coach health digest for 2026-06-15",
+            "requiredSourceEndpoints": ["POST http://127.0.0.1:3000/api/health/coach-digest/generate"],
+            "requiredBoardEvidence": ["commentUrl", "sourceLinks"]
           },
           {
             "role": "scholar",

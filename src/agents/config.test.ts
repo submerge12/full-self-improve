@@ -36,6 +36,59 @@ describe("agent runtime config", () => {
     });
   });
 
+  test("accepts Coach daily-health role configuration", () => {
+    const config = validateAgentRuntimeConfig({
+      roles: {
+        coach: {
+          dryRun: true,
+          phases: ["daily-health"]
+        }
+      }
+    });
+
+    expect(config.roles.coach).toEqual({
+      dryRun: true,
+      phases: ["daily-health"]
+    });
+  });
+
+  test("rejects role phase combinations that do not match dry-run role defaults", () => {
+    expect(() =>
+      validateAgentRuntimeConfig({
+        roles: {
+          coach: {
+            dryRun: true,
+            phases: ["morning-plan"]
+          }
+        }
+      })
+    ).toThrow(/Agent config role coach cannot run phase morning-plan/);
+
+    expect(() =>
+      validateAgentRuntimeConfig({
+        roles: {
+          librarian: {
+            dryRun: true,
+            phases: ["daily-health"]
+          }
+        }
+      })
+    ).toThrow(/Agent config role librarian cannot run phase daily-health/);
+  });
+
+  test("rejects duplicate role phases", () => {
+    expect(() =>
+      validateAgentRuntimeConfig({
+        roles: {
+          coach: {
+            dryRun: true,
+            phases: ["daily-health", "daily-health"]
+          }
+        }
+      })
+    ).toThrow(/Agent config role coach phases must not contain duplicates/);
+  });
+
   test("rejects secret-like keys anywhere in agent config", () => {
     expect(() =>
       validateAgentRuntimeConfig({

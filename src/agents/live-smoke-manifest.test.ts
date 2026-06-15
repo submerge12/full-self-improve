@@ -23,6 +23,7 @@ describe("M2 live-smoke manifest", () => {
         "librarian:nightly-ingest:add_comment",
         "scholar:morning-plan:create_task",
         "nutritionist:daily-meals:create_task",
+        "coach:daily-health:add_comment",
         "scholar:evening-mastery:add_comment"
       ]
     });

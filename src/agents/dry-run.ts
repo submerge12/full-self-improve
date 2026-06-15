@@ -1,7 +1,7 @@
-export const AGENT_ROLES = ["librarian", "scholar", "nutritionist"] as const;
+export const AGENT_ROLES = ["librarian", "scholar", "nutritionist", "coach"] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
-export const AGENT_PHASES = ["nightly-ingest", "morning-plan", "evening-mastery", "daily-meals"] as const;
+export const AGENT_PHASES = ["nightly-ingest", "morning-plan", "evening-mastery", "daily-meals", "daily-health"] as const;
 export type AgentPhase = (typeof AGENT_PHASES)[number];
 
 export type AgentActionType = "create_task" | "add_comment";
@@ -80,7 +80,8 @@ const DEFAULT_MULTICA_BOARD = "daily-plan";
 const ROLE_PHASES = {
   librarian: ["nightly-ingest"],
   scholar: ["morning-plan", "evening-mastery"],
-  nutritionist: ["daily-meals"]
+  nutritionist: ["daily-meals"],
+  coach: ["daily-health"]
 } as const satisfies Record<AgentRole, readonly AgentPhase[]>;
 
 export function createAgentDryRunPlan(input: AgentDryRunInput): AgentDryRunPlan {
@@ -121,6 +122,7 @@ export function createAgentDayDryRunPlan(input: AgentDayDryRunInput): AgentDayDr
     createAgentDryRunPlan({ ...baseInput, role: "librarian", phase: "nightly-ingest" }),
     createAgentDryRunPlan({ ...baseInput, role: "scholar", phase: "morning-plan" }),
     createAgentDryRunPlan({ ...baseInput, role: "nutritionist", phase: "daily-meals" }),
+    createAgentDryRunPlan({ ...baseInput, role: "coach", phase: "daily-health" }),
     createAgentDryRunPlan({ ...baseInput, role: "scholar", phase: "evening-mastery" })
   ];
 
@@ -196,6 +198,17 @@ function externalReadsFor(input: AgentDryRunInput, phase: AgentPhase): AgentEndp
         method: "GET",
         url: `${knowledgeLoopBaseUrl}/api/mastery/summary`,
         purpose: "Fetch mastery rows and weak spots for the evening Scholar report."
+      }
+    ];
+  }
+
+  if (phase === "daily-health") {
+    return [
+      {
+        method: "POST",
+        url: `${knowledgeLoopBaseUrl}/api/health/coach-digest/generate`,
+        purpose: "Generate the deterministic daily health digest for Coach.",
+        jsonBody: { date: input.date, offline: true }
       }
     ];
   }
@@ -304,6 +317,22 @@ function intendedActionsFor(
           "When live, Scholar posts mastery deltas, weak spots, and tomorrow's recommended focus."
         ].join("\n"),
         checklist: ["Fetch mastery summary", "Summarize weak spots", "Post evening delta"],
+        sourceEndpoints
+      }
+    ];
+  }
+
+  if (phase === "daily-health") {
+    return [
+      {
+        target: "multica",
+        type: "add_comment",
+        title: `Coach health digest for ${input.date}`,
+        body: [
+          `Dry-run target board: ${multicaBoard}.`,
+          "When live, Coach posts metrics, exercise, sedentary, and compass HTTP context."
+        ].join("\n"),
+        checklist: ["Generate health digest", "Post digest", "Record source hash"],
         sourceEndpoints
       }
     ];

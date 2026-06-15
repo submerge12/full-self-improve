@@ -50,6 +50,7 @@ describe("kl agent config loading", () => {
       "GET http://127.0.0.1:3000/api/plan/today",
       "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13",
       "POST http://127.0.0.1:8000/api/meal-engine/procurement",
+      "POST http://127.0.0.1:3000/api/health/coach-digest/generate",
       "GET http://127.0.0.1:3000/api/mastery/summary"
     ]);
   });

@@ -51,6 +51,18 @@
           }
         },
         {
+          "role": "coach",
+          "phase": "daily-health",
+          "actionType": "add_comment",
+          "title": "Coach health digest for 2026-06-14",
+          "sourceEndpoints": ["POST http://127.0.0.1:3000/api/health/coach-digest/generate"],
+          "boardEvidence": {
+            "commentUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1004#comment-2003",
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/health/coach-digest/2026-06-14"],
+            "capturedAt": "2026-06-14T12:40:00Z"
+          }
+        },
+        {
           "role": "scholar",
           "phase": "evening-mastery",
           "actionType": "add_comment",
@@ -114,6 +126,18 @@
             "mealChecklist": ["Breakfast logged", "Lunch planned", "Dinner planned", "Hydration checked"],
             "sourceLinks": ["https://compass-health.example.invalid/meal-plan/2026-06-15"],
             "capturedAt": "2026-06-15T08:20:00Z"
+          }
+        },
+        {
+          "role": "coach",
+          "phase": "daily-health",
+          "actionType": "add_comment",
+          "title": "Coach health digest for 2026-06-15",
+          "sourceEndpoints": ["POST http://127.0.0.1:3000/api/health/coach-digest/generate"],
+          "boardEvidence": {
+            "commentUrl": "https://multica.example.invalid/workspaces/daily-plan/issues/1014#comment-2013",
+            "sourceLinks": ["https://knowledge-loop.example.invalid/source/health/coach-digest/2026-06-15"],
+            "capturedAt": "2026-06-15T12:40:00Z"
           }
         },
         {

@@ -34,6 +34,12 @@ const TOP_LEVEL_FIELDS = new Set([
   "roles"
 ]);
 const ROLE_FIELDS = new Set(["dryRun", "phases"]);
+const AGENT_CONFIG_ROLE_PHASES = {
+  librarian: ["nightly-ingest"],
+  scholar: ["morning-plan", "evening-mastery"],
+  nutritionist: ["daily-meals"],
+  coach: ["daily-health"]
+} as const satisfies Record<AgentRole, readonly AgentPhase[]>;
 
 export function loadAgentRuntimeConfig(configPath: string, projectRoot = process.cwd()): AgentRuntimeConfig {
   const resolvedPath = resolveConfigPath(configPath, projectRoot);
@@ -238,14 +244,25 @@ function parsePhases(role: AgentRole, value: unknown): readonly AgentPhase[] | u
     throw new Error(`Agent config role ${role} phases must be a non-empty array.`);
   }
 
-  return value.map((phase) => {
+  const allowedPhases: readonly AgentPhase[] = AGENT_CONFIG_ROLE_PHASES[role];
+  const phases = value.map((phase) => {
     assertString(phase, `roles.${role}.phases`);
     if (!isAgentPhase(phase)) {
       throw new Error(`Unknown agent config phase ${phase}.`);
     }
+    if (!allowedPhases.includes(phase)) {
+      throw new Error(
+        `Agent config role ${role} cannot run phase ${phase}. Expected one of: ${allowedPhases.join(", ")}.`
+      );
+    }
 
     return phase;
   });
+  if (new Set(phases).size !== phases.length) {
+    throw new Error(`Agent config role ${role} phases must not contain duplicates.`);
+  }
+
+  return phases;
 }
 
 function rejectSecretLikeKeys(value: unknown, pathParts: readonly string[] = []): void {
@@ -443,7 +460,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isAgentRole(value: string): value is AgentRole {
-  return value === "librarian" || value === "scholar" || value === "nutritionist";
+  return value === "librarian" || value === "scholar" || value === "nutritionist" || value === "coach";
 }
 
 function isAgentPhase(value: string): value is AgentPhase {
@@ -451,6 +468,7 @@ function isAgentPhase(value: string): value is AgentPhase {
     value === "nightly-ingest" ||
     value === "morning-plan" ||
     value === "evening-mastery" ||
-    value === "daily-meals"
+    value === "daily-meals" ||
+    value === "daily-health"
   );
 }

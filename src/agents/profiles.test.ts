@@ -14,7 +14,7 @@ describe("M2 agent profiles", () => {
 
     expect(profiles.map((profile) => profile.role).sort()).toEqual([...AGENT_ROLES].sort());
     for (const profile of profiles) {
-      expect(profile.name).toMatch(/^knowledge-loop-(librarian|scholar|nutritionist)$/u);
+      expect(profile.name).toMatch(/^knowledge-loop-(librarian|scholar|nutritionist|coach)$/u);
       expect(profile.description.length).toBeGreaterThan(20);
       expect(profile.systemPrompt).toContain("knowledge-loop");
       expect(profile.systemPrompt).toContain("Dry-run");
@@ -57,6 +57,15 @@ describe("M2 agent profiles", () => {
     expect(serialized).not.toContain("G:\\");
   });
 
+  test("Coach profile uses health extensions APIs without compass-health file access", () => {
+    const profile = getM2AgentProfile("coach");
+
+    expect(profile.name).toBe("knowledge-loop-coach");
+    expect(profile.supportedPhases).toEqual(["daily-health"]);
+    expect(profile.systemPrompt).toContain("Coach uses health-extensions APIs");
+    expect(profile.systemPrompt).toContain("must not read or write compass-health files");
+  });
+
   test("rejects unsafe profile policy defaults", () => {
     const unsafeProfile = {
       ...getM2AgentProfile("scholar"),
@@ -89,6 +98,8 @@ describe("M2 agent and Multica config examples", () => {
     expect(config.roles.librarian.phases).toEqual(["nightly-ingest"]);
     expect(config.roles.scholar.phases).toEqual(["morning-plan", "evening-mastery"]);
     expect(config.roles.nutritionist.phases).toEqual(["daily-meals"]);
+    expect(config.roles.coach.phases).toEqual(["daily-health"]);
+    expect(config.roles.coach.dryRun).toBe(true);
     expect(Object.values(config.roles).every((role) => role.dryRun)).toBe(true);
   });
 

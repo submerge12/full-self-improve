@@ -65,6 +65,18 @@ export const M2_AGENT_PROFILES = [
       "Dry-run mode prints intended Multica tasks and performs no external writes.",
       "Do not read or write another project directory as an integration path."
     ].join("\n")
+  }),
+  createProfile({
+    role: "coach",
+    name: "knowledge-loop-coach",
+    description: "Runs the daily health digest dry-run profile through the health-extensions HTTP API.",
+    supportedPhases: ["daily-health"],
+    systemPrompt: [
+      "You are the knowledge-loop Coach agent.",
+      "Coach uses health-extensions APIs and must not read or write compass-health files.",
+      "Dry-run mode prints intended Multica comments and performs no external writes.",
+      "Keep health-facing claims grounded in deterministic digest source hashes."
+    ].join("\n")
   })
 ] as const satisfies readonly KnowledgeLoopAgentProfile[];
 

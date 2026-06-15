@@ -1,8 +1,23 @@
 import { describe, expect, test } from "vitest";
 
-import { createAgentDayDryRunPlan, createAgentDryRunPlan, parseAgentPhase, parseAgentRole } from "./dry-run.js";
+import {
+  AGENT_PHASES,
+  AGENT_ROLES,
+  createAgentDayDryRunPlan,
+  createAgentDryRunPlan,
+  parseAgentPhase,
+  parseAgentRole
+} from "./dry-run.js";
 
 describe("agent dry-run profiles", () => {
+  test("defines Task7 roles and phases including Coach daily health", () => {
+    expect(AGENT_ROLES).toEqual(["librarian", "scholar", "nutritionist", "coach"]);
+    expect(AGENT_PHASES).toContain("daily-health");
+    expect(parseAgentRole("coach")).toBe("coach");
+    expect(parseAgentPhase("daily-health")).toBe("daily-health");
+    expect(createAgentDryRunPlan({ role: "coach", date: "2026-06-14" }).phase).toBe("daily-health");
+  });
+
   test("Librarian dry-run plans the ingest report without external writes", () => {
     const plan = createAgentDryRunPlan({
       role: "librarian",
@@ -145,8 +160,47 @@ describe("agent dry-run profiles", () => {
     ).toThrow(/nutritionistMealReadUrlTemplate must be an http\(s\) URL or a root-relative URL path/);
   });
 
+  test("Coach daily-health dry-run plans the deterministic health digest comment without external writes", () => {
+    const plan = createAgentDryRunPlan({
+      role: "coach",
+      phase: "daily-health",
+      date: "2026-06-14"
+    });
+
+    expect(plan).toMatchObject({
+      mode: "dry-run",
+      role: "coach",
+      phase: "daily-health",
+      date: "2026-06-14",
+      multicaBoard: "daily-plan",
+      externalWrites: [],
+      llmCost: { estimatedUsd: 0, source: "dry-run-no-llm" }
+    });
+    expect(plan.externalReads).toEqual([
+      {
+        method: "POST",
+        url: "http://127.0.0.1:3000/api/health/coach-digest/generate",
+        purpose: "Generate the deterministic daily health digest for Coach.",
+        jsonBody: { date: "2026-06-14", offline: true }
+      }
+    ]);
+    expect(plan.intendedActions).toEqual([
+      expect.objectContaining({
+        target: "multica",
+        type: "add_comment",
+        title: "Coach health digest for 2026-06-14",
+        checklist: ["Generate health digest", "Post digest", "Record source hash"],
+        sourceEndpoints: ["POST http://127.0.0.1:3000/api/health/coach-digest/generate"]
+      })
+    ]);
+    expect(plan.intendedActions[0]?.body).toContain("Dry-run target board: daily-plan.");
+    expect(plan.intendedActions[0]?.body).toContain(
+      "When live, Coach posts metrics, exercise, sedentary, and compass HTTP context."
+    );
+  });
+
   test("agent dry-run rejects invalid roles, phases, combinations, and dates", () => {
-    expect(() => parseAgentRole("coach")).toThrow(/Invalid agent role/);
+    expect(() => parseAgentRole("mentor")).toThrow(/Invalid agent role/);
     expect(() => parseAgentPhase("nightly")).toThrow(/Invalid agent phase/);
     expect(() =>
       createAgentDryRunPlan({ role: "librarian", phase: "morning-plan", date: "2026-06-13" })
@@ -175,6 +229,7 @@ describe("agent dry-run profiles", () => {
       "librarian:nightly-ingest",
       "scholar:morning-plan",
       "nutritionist:daily-meals",
+      "coach:daily-health",
       "scholar:evening-mastery"
     ]);
     expect(plan.externalReads.map((read) => `${read.method} ${read.url}`)).toEqual([
@@ -182,12 +237,14 @@ describe("agent dry-run profiles", () => {
       "GET http://127.0.0.1:3124/api/plan/today",
       "GET http://compass.local/api/meal-plan/today?date=2026-06-13",
       "POST http://compass.local/api/meal-engine/procurement",
+      "POST http://127.0.0.1:3124/api/health/coach-digest/generate",
       "GET http://127.0.0.1:3124/api/mastery/summary"
     ]);
     expect(plan.intendedActions.map((action) => action.title)).toEqual([
       "Librarian ingest report for 2026-06-13",
       "Scholar study plan for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
   });

@@ -26,10 +26,12 @@ describe("M2 board-day evidence", () => {
         "2026-06-14 librarian:nightly-ingest:add_comment",
         "2026-06-14 scholar:morning-plan:create_task",
         "2026-06-14 nutritionist:daily-meals:create_task",
+        "2026-06-14 coach:daily-health:add_comment",
         "2026-06-14 scholar:evening-mastery:add_comment",
         "2026-06-15 librarian:nightly-ingest:add_comment",
         "2026-06-15 scholar:morning-plan:create_task",
         "2026-06-15 nutritionist:daily-meals:create_task",
+        "2026-06-15 coach:daily-health:add_comment",
         "2026-06-15 scholar:evening-mastery:add_comment"
       ]
     });

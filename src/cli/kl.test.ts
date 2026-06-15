@@ -150,6 +150,16 @@ function writeValidLiveSmokeManifestFixture(manifestPath: string, dates: readonl
                 requiredBoardEvidence: ["taskUrl", "mealChecklist", "sourceLinks"]
               },
               {
+                role: "coach",
+                phase: "daily-health",
+                actionType: "add_comment",
+                title: `Coach health digest for ${date}`,
+                requiredSourceEndpoints: [
+                  "POST http://127.0.0.1:3000/api/health/coach-digest/generate"
+                ],
+                requiredBoardEvidence: ["commentUrl", "sourceLinks"]
+              },
+              {
                 role: "scholar",
                 phase: "evening-mastery",
                 actionType: "add_comment",
@@ -2541,9 +2551,27 @@ describe("kl CLI handler", () => {
     await expect(handleKlCommand(["agent", "--role", "librarian", "--date", "2026-06-13"])).rejects.toThrow(
       /supports only --dry-run/
     );
-    await expect(handleKlCommand(["agent", "--dry-run", "--role", "coach", "--date", "2026-06-13"])).rejects.toThrow(
+    await expect(handleKlCommand(["agent", "--dry-run", "--role", "mentor", "--date", "2026-06-13"])).rejects.toThrow(
       /Invalid agent role/
     );
+    await expect(
+      handleKlCommand(["agent", "--dry-run", "--role", "coach", "--date", "2026-06-13"])
+    ).resolves.toMatchObject({
+      command: "agent",
+      mode: "dry-run",
+      result: {
+        role: "coach",
+        phase: "daily-health",
+        date: "2026-06-13",
+        externalWrites: [],
+        intendedActions: [
+          expect.objectContaining({
+            title: "Coach health digest for 2026-06-13",
+            type: "add_comment"
+          })
+        ]
+      }
+    });
     await expect(
       handleKlCommand(["agent", "--dry-run", "--role", "librarian", "--phase", "morning-plan", "--date", "2026-06-13"])
     ).rejects.toThrow(/cannot run phase/);
@@ -2564,7 +2592,7 @@ describe("kl CLI handler", () => {
     ).rejects.toThrow(/Unknown option for agent: --bogus/);
   });
 
-  test("agent-day dry-run prints the M2 board-day sequence", async () => {
+  test("agent-day dry-run prints the board-day sequence with Coach health digest", async () => {
     const stdout = createCapture();
     const result = (await handleKlCommand(
       [
@@ -2597,12 +2625,14 @@ describe("kl CLI handler", () => {
       "librarian:nightly-ingest",
       "scholar:morning-plan",
       "nutritionist:daily-meals",
+      "coach:daily-health",
       "scholar:evening-mastery"
     ]);
     expect(result.result.intendedActions.map((action) => action.title)).toEqual([
       "Librarian ingest report for 2026-06-13",
       "Scholar study plan for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
   });
@@ -2660,8 +2690,8 @@ describe("kl CLI handler", () => {
         multicaBoard: "Holly Daily",
         status: "completed",
         totals: {
-          reads: 5,
-          publishedActions: 4,
+          reads: 6,
+          publishedActions: 5,
           blockers: 0,
           publishFailures: 0
         },
@@ -2689,6 +2719,12 @@ describe("kl CLI handler", () => {
               source: "not_configured"
             },
             {
+              role: "coach",
+              phase: "daily-health",
+              estimatedUsd: 0,
+              source: "not_configured"
+            },
+            {
               role: "scholar",
               phase: "evening-mastery",
               estimatedUsd: 0,
@@ -2702,6 +2738,7 @@ describe("kl CLI handler", () => {
       "Librarian ingest report for 2026-06-13",
       "Scholar study plan for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
     expect(calls.map((call) => String(call.input))).toEqual([
@@ -2712,6 +2749,8 @@ describe("kl CLI handler", () => {
       "http://compass.local/api/meal-plan/today?date=2026-06-13",
       "http://compass.local/api/meal-engine/procurement",
       "http://multica.local/api/tasks",
+      "http://knowledge.local/api/health/coach-digest/generate",
+      "http://multica.local/api/comments",
       "http://knowledge.local/api/mastery/summary",
       "http://multica.local/api/comments"
     ]);
@@ -2724,6 +2763,8 @@ describe("kl CLI handler", () => {
       "Bearer compass-read-secret",
       "Bearer board-secret",
       "Bearer knowledge-read-secret",
+      "Bearer board-secret",
+      "Bearer knowledge-read-secret",
       "Bearer board-secret"
     ]);
     expect(calls[5]?.init).toMatchObject({
@@ -2734,6 +2775,15 @@ describe("kl CLI handler", () => {
         Authorization: "Bearer compass-read-secret"
       },
       body: JSON.stringify({ start_date: "2026-06-13" })
+    });
+    expect(calls[7]?.init).toMatchObject({
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: "Bearer knowledge-read-secret"
+      },
+      body: JSON.stringify({ date: "2026-06-13", offline: true })
     });
     for (const secret of ["knowledge-read-secret", "compass-read-secret", "fallback-read-secret", "board-secret"]) {
       expect(stdout.text()).not.toContain(secret);
@@ -2780,6 +2830,8 @@ describe("kl CLI handler", () => {
       "Bearer legacy-read-secret",
       "Bearer board-secret",
       "Bearer legacy-read-secret",
+      "Bearer legacy-read-secret",
+      "Bearer board-secret",
       "Bearer legacy-read-secret",
       "Bearer board-secret",
       "Bearer legacy-read-secret",
@@ -3102,8 +3154,8 @@ describe("kl CLI handler", () => {
           multicaBoard: "Holly Daily",
           status: "completed",
           totals: {
-            reads: 5,
-            publishedActions: 4,
+            reads: 6,
+            publishedActions: 5,
             blockers: 0,
             publishFailures: 0
           }
@@ -3117,6 +3169,7 @@ describe("kl CLI handler", () => {
       "Librarian ingest report for 2026-06-14",
       "Scholar study plan for 2026-06-14",
       "Nutrition plan for 2026-06-14",
+      "Coach health digest for 2026-06-14",
       "Scholar mastery report for 2026-06-14"
     ]);
     expect(calls.map((call) => String(call.input))).toEqual([
@@ -3127,6 +3180,8 @@ describe("kl CLI handler", () => {
       "http://compass.local/api/meal-plan/today?date=2026-06-14",
       "http://compass.local/api/meal-engine/procurement",
       "http://multica.local/api/tasks",
+      "http://knowledge.local/api/health/coach-digest/generate",
+      "http://multica.local/api/comments",
       "http://knowledge.local/api/mastery/summary",
       "http://multica.local/api/comments"
     ]);
@@ -3137,6 +3192,8 @@ describe("kl CLI handler", () => {
       "Bearer board-secret",
       "Bearer compass-read-secret",
       "Bearer compass-read-secret",
+      "Bearer board-secret",
+      "Bearer knowledge-read-secret",
       "Bearer board-secret",
       "Bearer knowledge-read-secret",
       "Bearer board-secret"
@@ -3337,8 +3394,8 @@ describe("kl CLI handler", () => {
           url: "http://127.0.0.1:3000/api/plan/today"
         },
         totals: {
-          reads: 4,
-          publishedActions: 4,
+          reads: 5,
+          publishedActions: 5,
           blockers: 1,
           publishFailures: 0
         },
@@ -3350,6 +3407,7 @@ describe("kl CLI handler", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:blocked",
       "nutritionist:daily-meals:completed",
+      "coach:daily-health:completed",
       "scholar:evening-mastery:completed"
     ]);
     expect(result.result.blockerTitle).toBe("Agent blocked for 2026-06-13");
@@ -3384,6 +3442,7 @@ describe("kl CLI handler", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:completed",
       "nutritionist:daily-meals:blocked",
+      "coach:daily-health:completed",
       "scholar:evening-mastery:completed"
     ]);
   });
@@ -3694,6 +3753,7 @@ describe("kl CLI handler", () => {
                 "librarian:nightly-ingest:add_comment",
                 "scholar:morning-plan:create_task",
                 "nutritionist:daily-meals:create_task",
+                "coach:daily-health:add_comment",
                 "scholar:evening-mastery:add_comment"
               ]
             }
@@ -4439,10 +4499,12 @@ describe("kl CLI handler", () => {
               "2026-06-14 librarian:nightly-ingest:add_comment",
               "2026-06-14 scholar:morning-plan:create_task",
               "2026-06-14 nutritionist:daily-meals:create_task",
+              "2026-06-14 coach:daily-health:add_comment",
               "2026-06-14 scholar:evening-mastery:add_comment",
               "2026-06-15 librarian:nightly-ingest:add_comment",
               "2026-06-15 scholar:morning-plan:create_task",
               "2026-06-15 nutritionist:daily-meals:create_task",
+              "2026-06-15 coach:daily-health:add_comment",
               "2026-06-15 scholar:evening-mastery:add_comment"
             ]
           }

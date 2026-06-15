@@ -45,12 +45,14 @@ describe("agent day runner", () => {
       "librarian:nightly-ingest:planned",
       "scholar:morning-plan:planned",
       "nutritionist:daily-meals:planned",
+      "coach:daily-health:planned",
       "scholar:evening-mastery:planned"
     ]);
     expect(report.llmCost.perAgent.map((entry) => `${entry.role}:${entry.phase}:${entry.estimatedUsd}`)).toEqual([
       "librarian:nightly-ingest:0",
       "scholar:morning-plan:0",
       "nutritionist:daily-meals:0",
+      "coach:daily-health:0",
       "scholar:evening-mastery:0"
     ]);
   });
@@ -79,27 +81,36 @@ describe("agent day runner", () => {
     });
 
     expect(report.status).toBe("completed");
-    expect(report.entries.map((entry) => entry.status)).toEqual(["completed", "completed", "completed", "completed"]);
+    expect(report.entries.map((entry) => entry.status)).toEqual([
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed"
+    ]);
     expect(reads.map((read) => `${read.method} ${read.url}`)).toEqual([
       "POST http://127.0.0.1:3000/api/ingest/run?adapter=holly-vault",
       "GET http://127.0.0.1:3000/api/plan/today",
       "GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13",
       "POST http://127.0.0.1:8000/api/meal-engine/procurement",
+      "POST http://127.0.0.1:3000/api/health/coach-digest/generate",
       "GET http://127.0.0.1:3000/api/mastery/summary"
     ]);
     expect(reads[3]).toMatchObject({ jsonBody: { start_date: "2026-06-13" } });
+    expect(reads[4]).toMatchObject({ jsonBody: { date: "2026-06-13", offline: true } });
     expect(report.publishedActions.map((publish) => publish.action.title)).toEqual([
       "Librarian ingest report for 2026-06-13",
       "Scholar study plan for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
     expect(report.blockers).toEqual([]);
     expect(report.publishFailures).toEqual([]);
     expect(report.skipped).toEqual([]);
     expect(report.totals).toEqual({
-      reads: 5,
-      publishedActions: 4,
+      reads: 6,
+      publishedActions: 5,
       blockers: 0,
       publishFailures: 0
     });
@@ -111,6 +122,8 @@ describe("agent day runner", () => {
       "read:GET http://127.0.0.1:8000/api/meal-plan/today?date=2026-06-13",
       "read:POST http://127.0.0.1:8000/api/meal-engine/procurement",
       "publish:Nutrition plan for 2026-06-13",
+      "read:POST http://127.0.0.1:3000/api/health/coach-digest/generate",
+      "publish:Coach health digest for 2026-06-13",
       "read:GET http://127.0.0.1:3000/api/mastery/summary",
       "publish:Scholar mastery report for 2026-06-13"
     ]);
@@ -148,16 +161,18 @@ describe("agent day runner", () => {
       "librarian:nightly-ingest",
       "scholar:morning-plan",
       "nutritionist:daily-meals",
+      "coach:daily-health",
       "scholar:evening-mastery"
     ]);
     expect(report.entries.map((entry) => `${entry.role}:${entry.phase}:${entry.llmCost.estimatedUsd}`)).toEqual([
       "librarian:nightly-ingest:0.0125",
       "scholar:morning-plan:0.0125",
       "nutritionist:daily-meals:0",
+      "coach:daily-health:0.0125",
       "scholar:evening-mastery:0.0125"
     ]);
     expect(report.llmCost).toMatchObject({
-      estimatedUsd: 0.0375,
+      estimatedUsd: 0.05,
       source: "pi-harness-live"
     });
     expect(report.llmCost.perAgent[0]).toMatchObject({
@@ -231,6 +246,7 @@ describe("agent day runner", () => {
       "cost_unavailable",
       "cost_unavailable",
       "cost_unavailable",
+      "cost_unavailable",
       "cost_unavailable"
     ]);
     expect(serialized).toContain("token=REDACTED");
@@ -266,6 +282,7 @@ describe("agent day runner", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:blocked",
       "nutritionist:daily-meals:completed",
+      "coach:daily-health:completed",
       "scholar:evening-mastery:completed"
     ]);
     expect(report.skipped).toEqual([]);
@@ -274,8 +291,8 @@ describe("agent day runner", () => {
     expect(report.blockers[0]?.body).not.toContain(secret);
     expect(report.blockers[0]?.body).not.toContain("G:\\pi-harness");
     expect(report.totals).toEqual({
-      reads: 4,
-      publishedActions: 4,
+      reads: 5,
+      publishedActions: 5,
       blockers: 1,
       publishFailures: 0
     });
@@ -283,6 +300,7 @@ describe("agent day runner", () => {
       "Librarian ingest report for 2026-06-13",
       "Agent blocked for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
   });
@@ -320,6 +338,7 @@ describe("agent day runner", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:blocked",
       "nutritionist:daily-meals:completed",
+      "coach:daily-health:completed",
       "scholar:evening-mastery:completed"
     ]);
     expect(report.blockers).toHaveLength(1);
@@ -332,14 +351,15 @@ describe("agent day runner", () => {
     expect(report.publishFailures[0]?.message).not.toContain("G:\\pi-harness");
     expect(report.entries[1]?.publishFailures).toHaveLength(1);
     expect(report.totals).toEqual({
-      reads: 4,
-      publishedActions: 3,
+      reads: 5,
+      publishedActions: 4,
       blockers: 1,
       publishFailures: 1
     });
     expect(publishedActions.map((action) => action.title)).toEqual([
       "Librarian ingest report for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
   });
@@ -372,6 +392,7 @@ describe("agent day runner", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:blocked",
       "nutritionist:daily-meals:completed",
+      "coach:daily-health:completed",
       "scholar:evening-mastery:completed"
     ]);
     expect(report.blockers).toEqual([]);
@@ -381,14 +402,15 @@ describe("agent day runner", () => {
     expect(report.publishFailures[0]?.message).not.toContain("G:\\multica");
     expect(report.entries[1]?.publishFailures).toHaveLength(1);
     expect(report.totals).toEqual({
-      reads: 5,
-      publishedActions: 3,
+      reads: 6,
+      publishedActions: 4,
       blockers: 0,
       publishFailures: 1
     });
     expect(publishedActions.map((action) => action.title)).toEqual([
       "Librarian ingest report for 2026-06-13",
       "Nutrition plan for 2026-06-13",
+      "Coach health digest for 2026-06-13",
       "Scholar mastery report for 2026-06-13"
     ]);
   });

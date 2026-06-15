@@ -139,7 +139,7 @@ function authorizeWebRequest(
   headers: ApiRequest["headers"],
   expectedBearerToken: string | undefined
 ): ApiResponse<ApiHandlerResponseBody> | undefined {
-  const route = findApiRoute(method, path);
+  const route = findApiRoute(method, path) ?? findApiRoute(method, pathWithoutSearch(path));
   if (route === undefined || route.auth === "public_read") {
     return undefined;
   }
@@ -187,6 +187,18 @@ function authorizeWebRequest(
         }
       }
     };
+  }
+}
+
+function pathWithoutSearch(path: string): string {
+  try {
+    const url = new URL(path, "https://knowledge-loop.local");
+    if (url.origin !== "https://knowledge-loop.local") {
+      return path;
+    }
+    return url.pathname;
+  } catch {
+    return path;
   }
 }
 

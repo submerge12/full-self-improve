@@ -42,11 +42,21 @@ import {
   updateHealthMetric
 } from "../health-extensions/metrics.js";
 import {
+  computeSedentarySummary,
+  evaluateBreakReminders,
+  ingestSedentarySpan,
+  type BreakReminderEvaluationInput,
+  type SedentarySummaryOptions
+} from "../health-extensions/sedentary.js";
+import {
   assertIsoDate,
   assertIsoInstant,
+  assertSafeText,
   type ExerciseIntensity,
-  type HealthMetricQuery
+  type HealthMetricQuery,
+  type StoredSedentarySpan
 } from "../health-extensions/schema.js";
+import { parseWindowsLoggerSpanPost } from "../health-extensions/windows-logger-contract.js";
 
 export interface ApiRequest {
   readonly method: ApiMethod;
@@ -183,6 +193,16 @@ interface ExerciseCompletionQuery {
   to: string;
 }
 
+interface SedentarySpanResponse {
+  readonly id: number;
+  readonly sourceId?: string;
+  readonly spanStart: string;
+  readonly spanEnd: string;
+  readonly state: string;
+  readonly confidence?: number;
+  readonly receivedAt: string;
+}
+
 class ApiBadRequestError extends Error {
   constructor(message: string) {
     super(message);
@@ -254,6 +274,12 @@ export async function handleApiRequest(
         return handleExerciseSessionComplete(request, context);
       case "health.exercise.completion":
         return handleExerciseCompletion(request, context);
+      case "health.sedentary.spans.ingest":
+        return handleSedentarySpanIngest(request, context);
+      case "health.sedentary.summary":
+        return handleSedentarySummary(request, context);
+      case "health.break-reminders.evaluate":
+        return handleBreakReminderEvaluate(request, context);
     }
   } catch (error) {
     if (error instanceof ApiBadRequestError || isRouteInputError(route.id, error)) {
@@ -451,6 +477,33 @@ function handleExerciseCompletion(request: ApiRequest, context: ApiHandlerContex
   const summary = queryExerciseCompletion(context.db, parseExerciseCompletionQuery(request.path));
 
   return successResponse("health.exercise.completion", { summary });
+}
+
+function handleSedentarySpanIngest(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): ApiResponse<ApiHandlerResponseBody> {
+  const span = ingestSedentarySpan(context.db, parseSedentarySpanIngestBody(request.body));
+
+  return successResponse("health.sedentary.spans.ingest", { span: stableSedentarySpan(span) });
+}
+
+function handleSedentarySummary(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): ApiResponse<ApiHandlerResponseBody> {
+  const summary = computeSedentarySummary(context.db, parseSedentarySummaryQuery(request.path));
+
+  return successResponse("health.sedentary.summary", { summary });
+}
+
+function handleBreakReminderEvaluate(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): ApiResponse<ApiHandlerResponseBody> {
+  const result = evaluateBreakReminders(context.db, parseBreakReminderEvaluationBody(request.body));
+
+  return successResponse("health.break-reminders.evaluate", { result });
 }
 
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
@@ -668,6 +721,54 @@ function parseExerciseCompletionQuery(path: string): ExerciseCompletionQuery {
   return {
     from: requiredIsoDateQuery(url.searchParams.get("from"), "from"),
     to: requiredIsoDateQuery(url.searchParams.get("to"), "to")
+  };
+}
+
+function parseSedentarySpanIngestBody(body: unknown): ReturnType<typeof parseWindowsLoggerSpanPost> {
+  try {
+    return parseWindowsLoggerSpanPost(body);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
+function parseSedentarySummaryQuery(path: string): SedentarySummaryOptions {
+  const url = parseRequestPath(path);
+  const from = requiredIsoInstantQuery(url.searchParams.get("from"), "from", "Sedentary summary");
+  const to = requiredIsoInstantQuery(url.searchParams.get("to"), "to", "Sedentary summary");
+  assertOrderedInstantWindow(from, to);
+  const activeBreakMinutes = optionalNonNegativeIntegerQuery(url.searchParams.get("activeBreakMinutes"), "activeBreakMinutes");
+  const mergeUnknownGaps = optionalBooleanQuery(url.searchParams.get("mergeUnknownGaps"), "mergeUnknownGaps");
+
+  return {
+    from,
+    to,
+    ...(activeBreakMinutes === undefined ? {} : { activeBreakMinutes }),
+    ...(mergeUnknownGaps === undefined ? {} : { mergeUnknownGaps })
+  };
+}
+
+function parseBreakReminderEvaluationBody(body: unknown): BreakReminderEvaluationInput {
+  const record = parseBodyRecord(body);
+  const from = requiredIsoInstantBody(record, "from");
+  const to = requiredIsoInstantBody(record, "to");
+  assertOrderedInstantWindow(from, to);
+  const thresholdMinutes = optionalPositiveSafeInteger(record.thresholdMinutes, "thresholdMinutes");
+  const cooldownMinutes = optionalNonNegativeSafeInteger(record.cooldownMinutes, "cooldownMinutes");
+  const activeBreakMinutes = optionalNonNegativeSafeInteger(record.activeBreakMinutes, "activeBreakMinutes");
+  const evaluatedAt = optionalIsoInstantBody(record.evaluatedAt, "evaluatedAt");
+  const mergeUnknownGaps = optionalBoolean(record.mergeUnknownGaps, "mergeUnknownGaps");
+  const deliveryChannel = optionalSafeText(record.deliveryChannel, "deliveryChannel");
+
+  return {
+    from,
+    to,
+    ...(thresholdMinutes === undefined ? {} : { thresholdMinutes }),
+    ...(cooldownMinutes === undefined ? {} : { cooldownMinutes }),
+    ...(evaluatedAt === undefined ? {} : { evaluatedAt }),
+    ...(activeBreakMinutes === undefined ? {} : { activeBreakMinutes }),
+    ...(mergeUnknownGaps === undefined ? {} : { mergeUnknownGaps }),
+    ...(deliveryChannel === undefined ? {} : { deliveryChannel })
   };
 }
 
@@ -901,6 +1002,46 @@ function optionalPositiveSafeInteger(value: unknown, field: string): number | un
   return value;
 }
 
+function optionalNonNegativeSafeInteger(value: unknown, field: string): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new ApiBadRequestError(`Request body field ${field} must be a non-negative safe integer.`);
+  }
+
+  return value;
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "boolean") {
+    throw new ApiBadRequestError(`Request body field ${field} must be boolean.`);
+  }
+
+  return value;
+}
+
+function optionalSafeText(value: unknown, field: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiBadRequestError(`Request body field ${field} must be a non-empty string.`);
+  }
+
+  try {
+    return assertSafeText(value, field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
 function optionalExerciseIntensity(value: unknown): ExerciseIntensity | undefined {
   if (value === undefined) {
     return undefined;
@@ -923,6 +1064,80 @@ function requiredIsoDateQuery(value: string | null, field: "from" | "to"): strin
   } catch (error) {
     throw new ApiBadRequestError(errorMessage(error));
   }
+}
+
+function requiredIsoInstantQuery(value: string | null, field: "from" | "to", label: string): string {
+  if (value === null || value.trim().length === 0) {
+    throw new ApiBadRequestError(`${label} query parameter ${field} must be an ISO instant.`);
+  }
+
+  try {
+    return assertIsoInstant(value, field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
+function requiredIsoInstantBody(record: Record<string, unknown>, field: "from" | "to"): string {
+  try {
+    return assertIsoInstant(requiredString(record, field), field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
+function optionalIsoInstantBody(value: unknown, field: string): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiBadRequestError(`Request body field ${field} must be a non-empty string.`);
+  }
+
+  try {
+    return assertIsoInstant(value, field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
+function assertOrderedInstantWindow(from: string, to: string): void {
+  if (to <= from) {
+    throw new ApiBadRequestError("to must be after from");
+  }
+}
+
+function optionalNonNegativeIntegerQuery(value: string | null, field: string): number | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    throw new ApiBadRequestError(`Sedentary summary query parameter ${field} must be a non-negative integer string.`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new ApiBadRequestError(`Sedentary summary query parameter ${field} must be a non-negative integer string.`);
+  }
+
+  return parsed;
+}
+
+function optionalBooleanQuery(value: string | null, field: string): boolean | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+
+  throw new ApiBadRequestError(`Sedentary summary query parameter ${field} must be true or false.`);
 }
 
 function requiredReviewRating(value: unknown): PersistentReviewRating {
@@ -1045,6 +1260,18 @@ function nowDate(context: ApiHandlerContext): Date {
   return context.now ?? new Date();
 }
 
+function stableSedentarySpan(span: StoredSedentarySpan): SedentarySpanResponse {
+  return {
+    id: span.id,
+    ...(span.sourceId === undefined ? {} : { sourceId: span.sourceId }),
+    spanStart: span.spanStart,
+    spanEnd: span.spanEnd,
+    state: span.state,
+    ...(span.confidence === undefined ? {} : { confidence: span.confidence }),
+    receivedAt: span.receivedAt
+  };
+}
+
 function successResponse(routeId: ApiRouteId, data: Record<string, unknown>): ApiResponse<ApiHandlerResponseBody> {
   return {
     status: 200,
@@ -1107,6 +1334,10 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
     case "health.exercise.sessions.complete":
     case "health.exercise.completion":
       return isExerciseInputError(error.message);
+    case "health.sedentary.spans.ingest":
+    case "health.sedentary.summary":
+    case "health.break-reminders.evaluate":
+      return isSedentaryInputError(error.message);
     default:
       return false;
   }
@@ -1203,6 +1434,16 @@ function isExerciseInputError(message: string): boolean {
       message
     ) ||
     /^defaultDays /.test(message)
+  );
+}
+
+function isSedentaryInputError(message: string): boolean {
+  return (
+    message === "spanEnd must be after spanStart" ||
+    message === "state must be active, idle, or unknown" ||
+    message === "to must be after from" ||
+    /^(sourceId|spanStart|spanEnd|receivedAt|from|to|evaluatedAt|deliveryChannel) /.test(message) ||
+    /^(confidence|thresholdMinutes|cooldownMinutes|activeBreakMinutes) must /.test(message)
   );
 }
 

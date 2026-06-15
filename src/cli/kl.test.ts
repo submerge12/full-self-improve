@@ -218,7 +218,10 @@ type HealthCountableTable =
   | "health_trace_events"
   | "exercise_templates"
   | "exercise_plans"
-  | "exercise_sessions";
+  | "exercise_sessions"
+  | "sedentary_spans"
+  | "sedentary_streaks"
+  | "break_reminders";
 
 interface TraceCliCommandResult {
   command: "trace";
@@ -252,6 +255,20 @@ interface HealthExerciseCliCommandResult {
   command: "health-exercise";
   mode: "mock-persistent";
   action: "template.create" | "plan.create" | "complete" | "completion";
+  result: unknown;
+}
+
+interface HealthSedentaryCliCommandResult {
+  command: "health-sedentary";
+  mode: "mock-persistent";
+  action: "ingest-span" | "summary";
+  result: unknown;
+}
+
+interface HealthBreakReminderCliCommandResult {
+  command: "health-break-reminder";
+  mode: "mock-persistent";
+  action: "evaluate";
   result: unknown;
 }
 
@@ -767,7 +784,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
   });
 
@@ -1612,6 +1629,502 @@ describe("kl CLI handler", () => {
         "2026-06-22"
       ])
     ).rejects.toThrow(/requires exactly one --from/);
+  });
+
+  test("health-sedentary ingests spans summarizes read-only and evaluates deterministic reminders", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-sedentary-flow-")), "sedentary.db");
+    const ingestStdout = createCapture();
+
+    const firstIngest = (await handleKlCommand(
+      [
+        "health-sedentary",
+        "ingest-span",
+        "--db",
+        dbPath,
+        "--source-id",
+        "desk-idle-1",
+        "--start",
+        "2026-06-15T10:00:00.000Z",
+        "--end",
+        "2026-06-15T11:10:00.000Z",
+        "--state",
+        "idle",
+        "--confidence",
+        "0.95",
+        "--received-at",
+        "2026-06-15T11:10:00.000Z"
+      ],
+      { stdout: ingestStdout.sink }
+    )) as unknown as HealthSedentaryCliCommandResult;
+
+    expect(parseCapturedJson(ingestStdout)).toEqual(firstIngest);
+    expect(firstIngest).toMatchObject({
+      command: "health-sedentary",
+      mode: "mock-persistent",
+      action: "ingest-span",
+      result: {
+        id: 1,
+        sourceId: "desk-idle-1",
+        spanStart: "2026-06-15T10:00:00.000Z",
+        spanEnd: "2026-06-15T11:10:00.000Z",
+        state: "idle",
+        confidence: 0.95,
+        receivedAt: "2026-06-15T11:10:00.000Z"
+      }
+    });
+    expect(existsSync(dbPath)).toBe(true);
+
+    await handleKlCommand([
+      "health-sedentary",
+      "ingest-span",
+      "--db",
+      dbPath,
+      "--source-id",
+      "desk-active-break",
+      "--start",
+      "2026-06-15T11:10:00.000Z",
+      "--end",
+      "2026-06-15T11:14:00.000Z",
+      "--state",
+      "active"
+    ]);
+    await handleKlCommand([
+      "health-sedentary",
+      "ingest-span",
+      "--db",
+      dbPath,
+      "--source-id",
+      "desk-idle-2",
+      "--start",
+      "2026-06-15T11:14:00.000Z",
+      "--end",
+      "2026-06-15T11:40:00.000Z",
+      "--state",
+      "idle"
+    ]);
+
+    const beforeSummaryRows = {
+      spans: countHealthRows(dbPath, "sedentary_spans"),
+      streaks: countHealthRows(dbPath, "sedentary_streaks"),
+      reminders: countHealthRows(dbPath, "break_reminders")
+    };
+    const summaryStdout = createCapture();
+
+    const summary = (await handleKlCommand(
+      [
+        "health-sedentary",
+        "summary",
+        "--db",
+        dbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:40:00.000Z",
+        "--active-break-minutes",
+        "5",
+        "--merge-unknown-gaps",
+        "false"
+      ],
+      { stdout: summaryStdout.sink }
+    )) as unknown as HealthSedentaryCliCommandResult;
+
+    expect(parseCapturedJson(summaryStdout)).toEqual(summary);
+    expect(summary).toMatchObject({
+      command: "health-sedentary",
+      mode: "mock-persistent",
+      action: "summary",
+      result: {
+        from: "2026-06-15T10:00:00.000Z",
+        to: "2026-06-15T11:40:00.000Z",
+        idleMinutes: 96,
+        activeMinutes: 4,
+        unknownMinutes: 0,
+        longestIdleStreakMinutes: 100,
+        currentIdleStreakMinutes: 100,
+        currentIdleStreak: {
+          windowStart: "2026-06-15T10:00:00.000Z",
+          windowEnd: "2026-06-15T11:40:00.000Z",
+          durationMinutes: 100,
+          idleMinutes: 96,
+          sourceSpanIds: [1, 2, 3]
+        },
+        idleStreaks: [
+          {
+            windowStart: "2026-06-15T10:00:00.000Z",
+            windowEnd: "2026-06-15T11:40:00.000Z",
+            durationMinutes: 100,
+            idleMinutes: 96,
+            sourceSpanIds: [1, 2, 3]
+          }
+        ],
+        spans: [
+          { id: 1, sourceId: "desk-idle-1", state: "idle" },
+          { id: 2, sourceId: "desk-active-break", state: "active" },
+          { id: 3, sourceId: "desk-idle-2", state: "idle" }
+        ]
+      }
+    });
+    expect({
+      spans: countHealthRows(dbPath, "sedentary_spans"),
+      streaks: countHealthRows(dbPath, "sedentary_streaks"),
+      reminders: countHealthRows(dbPath, "break_reminders")
+    }).toEqual(beforeSummaryRows);
+
+    const reminderStdout = createCapture();
+    const firstReminder = (await handleKlCommand(
+      [
+        "health-break-reminder",
+        "evaluate",
+        "--db",
+        dbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:40:00.000Z",
+        "--threshold-minutes",
+        "60",
+        "--cooldown-minutes",
+        "30",
+        "--evaluated-at",
+        "2026-06-15T11:40:00.000Z",
+        "--active-break-minutes",
+        "5",
+        "--merge-unknown-gaps",
+        "false",
+        "--delivery-channel",
+        "desktop"
+      ],
+      { stdout: reminderStdout.sink }
+    )) as unknown as HealthBreakReminderCliCommandResult;
+
+    expect(parseCapturedJson(reminderStdout)).toEqual(firstReminder);
+    expect(firstReminder).toMatchObject({
+      command: "health-break-reminder",
+      mode: "mock-persistent",
+      action: "evaluate",
+      result: {
+        status: "eligible",
+        summary: { currentIdleStreakMinutes: 100 },
+        streak: {
+          id: 1,
+          windowStart: "2026-06-15T10:00:00.000Z",
+          windowEnd: "2026-06-15T11:40:00.000Z",
+          durationMinutes: 100,
+          sourceSpanIds: [1, 2, 3],
+          computedAt: "2026-06-15T11:40:00.000Z"
+        },
+        reminder: {
+          id: 1,
+          streakId: 1,
+          eligibleAt: "2026-06-15T11:00:00.000Z",
+          status: "eligible",
+          reason: "sedentary streak reached 60 minutes",
+          deliveryChannel: "desktop"
+        }
+      }
+    });
+    expect(countHealthRows(dbPath, "sedentary_streaks")).toBe(1);
+    expect(countHealthRows(dbPath, "break_reminders")).toBe(1);
+
+    const secondReminder = (await handleKlCommand([
+      "health-break-reminder",
+      "evaluate",
+      "--db",
+      dbPath,
+      "--from",
+      "2026-06-15T10:00:00.000Z",
+      "--to",
+      "2026-06-15T11:40:00.000Z",
+      "--threshold-minutes",
+      "60",
+      "--cooldown-minutes",
+      "30",
+      "--evaluated-at",
+      "2026-06-15T11:45:00.000Z"
+    ])) as unknown as HealthBreakReminderCliCommandResult;
+
+    expect(secondReminder).toMatchObject({
+      command: "health-break-reminder",
+      mode: "mock-persistent",
+      action: "evaluate",
+      result: {
+        status: "eligible",
+        streak: { id: 1 },
+        reminder: { id: 1, status: "eligible" }
+      }
+    });
+    expect(countHealthRows(dbPath, "sedentary_streaks")).toBe(1);
+    expect(countHealthRows(dbPath, "break_reminders")).toBe(1);
+  });
+
+  test("health-sedentary summary and break reminder evaluate do not create missing databases", async () => {
+    const summaryDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-sedentary-missing-summary-")), "missing.db");
+    const reminderDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-break-reminder-missing-evaluate-")), "missing.db");
+
+    await expect(
+      handleKlCommand([
+        "health-sedentary",
+        "summary",
+        "--db",
+        summaryDbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:00:00.000Z"
+      ])
+    ).rejects.toThrow(/Health sedentary database does not exist/);
+    await expect(
+      handleKlCommand([
+        "health-break-reminder",
+        "evaluate",
+        "--db",
+        reminderDbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:00:00.000Z"
+      ])
+    ).rejects.toThrow(/Health sedentary database does not exist/);
+
+    expect(existsSync(summaryDbPath)).toBe(false);
+    expect(existsSync(reminderDbPath)).toBe(false);
+  });
+
+  test("health-sedentary and break reminder validate options before creating missing databases where possible", async () => {
+    const cases: Array<{
+      readonly name: string;
+      readonly argv: (dbPath: string) => readonly string[];
+      readonly error: RegExp;
+    }> = [
+      {
+        name: "sedentary-state",
+        argv: (dbPath) => [
+          "health-sedentary",
+          "ingest-span",
+          "--db",
+          dbPath,
+          "--source-id",
+          "desk-idle-1",
+          "--start",
+          "2026-06-15T10:00:00.000Z",
+          "--end",
+          "2026-06-15T11:00:00.000Z",
+          "--state",
+          "away"
+        ],
+        error: /Invalid --state value "away"/
+      },
+      {
+        name: "sedentary-confidence",
+        argv: (dbPath) => [
+          "health-sedentary",
+          "ingest-span",
+          "--db",
+          dbPath,
+          "--source-id",
+          "desk-idle-1",
+          "--start",
+          "2026-06-15T10:00:00.000Z",
+          "--end",
+          "2026-06-15T11:00:00.000Z",
+          "--state",
+          "idle",
+          "--confidence",
+          "1.1"
+        ],
+        error: /Invalid --confidence value "1.1"/
+      },
+      {
+        name: "sedentary-span-order",
+        argv: (dbPath) => [
+          "health-sedentary",
+          "ingest-span",
+          "--db",
+          dbPath,
+          "--source-id",
+          "desk-idle-1",
+          "--start",
+          "2026-06-15T11:00:00.000Z",
+          "--end",
+          "2026-06-15T10:00:00.000Z",
+          "--state",
+          "idle"
+        ],
+        error: /Invalid --end value "2026-06-15T10:00:00.000Z"/
+      },
+      {
+        name: "sedentary-active-break",
+        argv: (dbPath) => [
+          "health-sedentary",
+          "summary",
+          "--db",
+          dbPath,
+          "--from",
+          "2026-06-15T10:00:00.000Z",
+          "--to",
+          "2026-06-15T11:00:00.000Z",
+          "--active-break-minutes",
+          "-1"
+        ],
+        error: /Invalid --active-break-minutes value "-1"/
+      },
+      {
+        name: "sedentary-boolean",
+        argv: (dbPath) => [
+          "health-sedentary",
+          "summary",
+          "--db",
+          dbPath,
+          "--from",
+          "2026-06-15T10:00:00.000Z",
+          "--to",
+          "2026-06-15T11:00:00.000Z",
+          "--merge-unknown-gaps",
+          "maybe"
+        ],
+        error: /Invalid --merge-unknown-gaps value "maybe"/
+      },
+      {
+        name: "break-threshold",
+        argv: (dbPath) => [
+          "health-break-reminder",
+          "evaluate",
+          "--db",
+          dbPath,
+          "--from",
+          "2026-06-15T10:00:00.000Z",
+          "--to",
+          "2026-06-15T11:00:00.000Z",
+          "--threshold-minutes",
+          "0"
+        ],
+        error: /Invalid --threshold-minutes value "0"/
+      },
+      {
+        name: "break-cooldown",
+        argv: (dbPath) => [
+          "health-break-reminder",
+          "evaluate",
+          "--db",
+          dbPath,
+          "--from",
+          "2026-06-15T10:00:00.000Z",
+          "--to",
+          "2026-06-15T11:00:00.000Z",
+          "--cooldown-minutes",
+          "-1"
+        ],
+        error: /Invalid --cooldown-minutes value "-1"/
+      },
+      {
+        name: "break-evaluated-at",
+        argv: (dbPath) => [
+          "health-break-reminder",
+          "evaluate",
+          "--db",
+          dbPath,
+          "--from",
+          "2026-06-15T10:00:00.000Z",
+          "--to",
+          "2026-06-15T11:00:00.000Z",
+          "--evaluated-at",
+          "2026-06-15"
+        ],
+        error: /Invalid --evaluated-at value "2026-06-15"/
+      }
+    ];
+
+    for (const testCase of cases) {
+      const dbPath = path.join(
+        mkdtempSync(path.join(tmpdir(), `kl-cli-health-sedentary-invalid-${testCase.name}-`)),
+        "missing.db"
+      );
+
+      await expect(handleKlCommand(testCase.argv(dbPath))).rejects.toThrow(testCase.error);
+      expect(existsSync(dbPath)).toBe(false);
+    }
+  });
+
+  test("health-sedentary and break reminder reject missing duplicate and unknown options", async () => {
+    const dbPath = createHealthMetricDb();
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["health-sedentary"])).rejects.toThrow(/requires one action/);
+    await expect(
+      handleKlCommand([
+        "health-sedentary",
+        "summary",
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:00:00.000Z"
+      ])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand([
+        "health-sedentary",
+        "summary",
+        "--db",
+        dbPath,
+        "--db",
+        otherDbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:00:00.000Z"
+      ])
+    ).rejects.toThrow(/requires exactly one --db/);
+    await expect(
+      handleKlCommand([
+        "health-sedentary",
+        "ingest-span",
+        "--db",
+        dbPath,
+        "--source-id",
+        "desk-idle-1",
+        "--start",
+        "2026-06-15T10:00:00.000Z",
+        "--end",
+        "2026-06-15T11:00:00.000Z",
+        "--state",
+        "idle",
+        "--bogus",
+        "1"
+      ])
+    ).rejects.toThrow(/Unknown option for health-sedentary ingest-span: --bogus/);
+
+    await expect(handleKlCommand(["health-break-reminder"])).rejects.toThrow(/requires action evaluate/);
+    await expect(handleKlCommand(["health-break-reminder", "send", "--db", dbPath])).rejects.toThrow(
+      /requires action evaluate/
+    );
+    await expect(
+      handleKlCommand([
+        "health-break-reminder",
+        "evaluate",
+        "--db",
+        dbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--from",
+        "2026-06-15T10:05:00.000Z",
+        "--to",
+        "2026-06-15T11:00:00.000Z"
+      ])
+    ).rejects.toThrow(/requires exactly one --from/);
+    await expect(
+      handleKlCommand([
+        "health-break-reminder",
+        "evaluate",
+        "--db",
+        dbPath,
+        "--from",
+        "2026-06-15T10:00:00.000Z",
+        "--to",
+        "2026-06-15T11:00:00.000Z",
+        "--bogus",
+        "1"
+      ])
+    ).rejects.toThrow(/Unknown option for health-break-reminder evaluate: --bogus/);
   });
 
   test("agent dry-run prints planned Multica actions without requiring API keys", async () => {

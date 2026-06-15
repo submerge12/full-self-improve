@@ -106,7 +106,9 @@ import {
   assertSafeText,
   normalizeHealthMetricInput,
   normalizeMetricKey,
-  type ExerciseIntensity
+  type ExerciseIntensity,
+  type SedentaryState,
+  type StoredSedentarySpan
 } from "../health-extensions/schema.js";
 import {
   completeExerciseSession,
@@ -119,6 +121,13 @@ import {
   type ExerciseTemplateDayInput,
   type ExerciseTemplateResult
 } from "../health-extensions/exercise.js";
+import {
+  computeSedentarySummary,
+  evaluateBreakReminders,
+  ingestSedentarySpan,
+  type BreakReminderEvaluationResult,
+  type SedentarySummary
+} from "../health-extensions/sedentary.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -247,6 +256,20 @@ export interface KlHealthExerciseCommandResult {
     | ExercisePlanResult
     | ExerciseSessionCompletionResult
     | ExerciseCompletionSummary;
+}
+
+export interface KlHealthSedentaryCommandResult {
+  readonly command: "health-sedentary";
+  readonly mode: "mock-persistent";
+  readonly action: "ingest-span" | "summary";
+  readonly result: StoredSedentarySpan | SedentarySummary;
+}
+
+export interface KlHealthBreakReminderCommandResult {
+  readonly command: "health-break-reminder";
+  readonly mode: "mock-persistent";
+  readonly action: "evaluate";
+  readonly result: BreakReminderEvaluationResult;
 }
 
 export interface KlAgentDryRunCommandResult {
@@ -435,6 +458,8 @@ export type KlCommandResult =
   | KlTraceCommandResult
   | KlHealthMetricCommandResult
   | KlHealthExerciseCommandResult
+  | KlHealthSedentaryCommandResult
+  | KlHealthBreakReminderCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
@@ -484,6 +509,14 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runHealthExerciseCommand(args);
   }
 
+  if (command === "health-sedentary") {
+    return runHealthSedentaryCommand(args);
+  }
+
+  if (command === "health-break-reminder") {
+    return runHealthBreakReminderCommand(args);
+  }
+
   if (command === "application") {
     return runApplicationCommand(args);
   }
@@ -529,7 +562,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -1089,6 +1122,164 @@ function runHealthExerciseCompletionCommand(args: readonly string[]): KlHealthEx
       command: "health-exercise",
       mode: "mock-persistent",
       action: "completion",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthSedentaryCommand(args: readonly string[]): KlHealthSedentaryCommandResult {
+  const [action, ...actionArgs] = args;
+
+  if (action === "ingest-span") {
+    return runHealthSedentaryIngestSpanCommand(actionArgs);
+  }
+  if (action === "summary") {
+    return runHealthSedentarySummaryCommand(actionArgs);
+  }
+
+  throw new UsageError(
+    `Command health-sedentary requires one action: ingest-span or summary. Received "${action ?? ""}".`
+  );
+}
+
+function runHealthSedentaryIngestSpanCommand(args: readonly string[]): KlHealthSedentaryCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--source-id", "--start", "--end", "--state", "--confidence", "--received-at"]),
+    "health-sedentary ingest-span"
+  );
+  const dbPath = requireOne(options, "--db", "health-sedentary ingest-span");
+  const sourceId = assertSafeText(requireOne(options, "--source-id", "health-sedentary ingest-span"), "sourceId");
+  const spanStart = parseCliIsoInstant(requireOne(options, "--start", "health-sedentary ingest-span"), "--start");
+  const spanEnd = parseCliIsoInstant(requireOne(options, "--end", "health-sedentary ingest-span"), "--end");
+  assertCliInstantRange(spanStart, spanEnd, "--end", "--start");
+  const state = parseSedentaryState(requireOne(options, "--state", "health-sedentary ingest-span"));
+  const confidenceValue = optionalOne(options, "--confidence", "health-sedentary ingest-span");
+  const receivedAtValue = optionalOne(options, "--received-at", "health-sedentary ingest-span");
+  const confidence = confidenceValue === undefined ? undefined : parseUnitNumber(confidenceValue, "--confidence");
+  const receivedAt =
+    receivedAtValue === undefined ? undefined : parseCliIsoInstant(receivedAtValue, "--received-at");
+  const db = new Database(dbPath);
+
+  try {
+    applyMigrations(db);
+    const result = ingestSedentarySpan(db, {
+      sourceId,
+      spanStart,
+      spanEnd,
+      state,
+      ...(confidence === undefined ? {} : { confidence }),
+      ...(receivedAt === undefined ? {} : { receivedAt })
+    });
+    return {
+      command: "health-sedentary",
+      mode: "mock-persistent",
+      action: "ingest-span",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthSedentarySummaryCommand(args: readonly string[]): KlHealthSedentaryCommandResult {
+  const options = parseOptions(
+    args,
+    new Set(["--db", "--from", "--to", "--active-break-minutes", "--merge-unknown-gaps"]),
+    "health-sedentary summary"
+  );
+  const dbPath = requireOne(options, "--db", "health-sedentary summary");
+  const from = parseCliIsoInstant(requireOne(options, "--from", "health-sedentary summary"), "--from");
+  const to = parseCliIsoInstant(requireOne(options, "--to", "health-sedentary summary"), "--to");
+  assertCliInstantRange(from, to, "--to");
+  const activeBreakValue = optionalOne(options, "--active-break-minutes", "health-sedentary summary");
+  const mergeUnknownValue = optionalOne(options, "--merge-unknown-gaps", "health-sedentary summary");
+  const activeBreakMinutes =
+    activeBreakValue === undefined ? undefined : parseNonNegativeSafeInteger(activeBreakValue, "--active-break-minutes");
+  const mergeUnknownGaps =
+    mergeUnknownValue === undefined ? undefined : parseCliBoolean(mergeUnknownValue, "--merge-unknown-gaps");
+  const db = openExistingHealthSedentaryDatabase(dbPath, { readonly: true });
+
+  try {
+    const result = computeSedentarySummary(db, {
+      from,
+      to,
+      ...(activeBreakMinutes === undefined ? {} : { activeBreakMinutes }),
+      ...(mergeUnknownGaps === undefined ? {} : { mergeUnknownGaps })
+    });
+    return {
+      command: "health-sedentary",
+      mode: "mock-persistent",
+      action: "summary",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function runHealthBreakReminderCommand(args: readonly string[]): KlHealthBreakReminderCommandResult {
+  const [action, ...actionArgs] = args;
+  if (action !== "evaluate") {
+    throw new UsageError(`Command health-break-reminder requires action evaluate. Received "${action ?? ""}".`);
+  }
+
+  const options = parseOptions(
+    actionArgs,
+    new Set([
+      "--db",
+      "--from",
+      "--to",
+      "--threshold-minutes",
+      "--cooldown-minutes",
+      "--evaluated-at",
+      "--active-break-minutes",
+      "--merge-unknown-gaps",
+      "--delivery-channel"
+    ]),
+    "health-break-reminder evaluate"
+  );
+  const dbPath = requireOne(options, "--db", "health-break-reminder evaluate");
+  const from = parseCliIsoInstant(requireOne(options, "--from", "health-break-reminder evaluate"), "--from");
+  const to = parseCliIsoInstant(requireOne(options, "--to", "health-break-reminder evaluate"), "--to");
+  assertCliInstantRange(from, to, "--to");
+  const thresholdValue = optionalOne(options, "--threshold-minutes", "health-break-reminder evaluate");
+  const cooldownValue = optionalOne(options, "--cooldown-minutes", "health-break-reminder evaluate");
+  const evaluatedAtValue = optionalOne(options, "--evaluated-at", "health-break-reminder evaluate");
+  const activeBreakValue = optionalOne(options, "--active-break-minutes", "health-break-reminder evaluate");
+  const mergeUnknownValue = optionalOne(options, "--merge-unknown-gaps", "health-break-reminder evaluate");
+  const deliveryChannelValue = optionalOne(options, "--delivery-channel", "health-break-reminder evaluate");
+  const thresholdMinutes =
+    thresholdValue === undefined ? undefined : parsePositiveSafeInteger(thresholdValue, "--threshold-minutes");
+  const cooldownMinutes =
+    cooldownValue === undefined ? undefined : parseNonNegativeSafeInteger(cooldownValue, "--cooldown-minutes");
+  const evaluatedAt =
+    evaluatedAtValue === undefined ? undefined : parseCliIsoInstant(evaluatedAtValue, "--evaluated-at");
+  const activeBreakMinutes =
+    activeBreakValue === undefined ? undefined : parseNonNegativeSafeInteger(activeBreakValue, "--active-break-minutes");
+  const mergeUnknownGaps =
+    mergeUnknownValue === undefined ? undefined : parseCliBoolean(mergeUnknownValue, "--merge-unknown-gaps");
+  const deliveryChannel =
+    deliveryChannelValue === undefined ? undefined : assertSafeText(deliveryChannelValue, "deliveryChannel");
+  const db = openExistingHealthSedentaryDatabase(dbPath);
+
+  try {
+    const result = evaluateBreakReminders(db, {
+      from,
+      to,
+      ...(thresholdMinutes === undefined ? {} : { thresholdMinutes }),
+      ...(cooldownMinutes === undefined ? {} : { cooldownMinutes }),
+      ...(evaluatedAt === undefined ? {} : { evaluatedAt }),
+      ...(activeBreakMinutes === undefined ? {} : { activeBreakMinutes }),
+      ...(mergeUnknownGaps === undefined ? {} : { mergeUnknownGaps }),
+      ...(deliveryChannel === undefined ? {} : { deliveryChannel })
+    });
+    return {
+      command: "health-break-reminder",
+      mode: "mock-persistent",
+      action: "evaluate",
       result
     };
   } finally {
@@ -2360,6 +2551,45 @@ function openExistingHealthExerciseDatabase(
   );
 }
 
+function openExistingHealthSedentaryDatabase(
+  dbPath: string,
+  options: { readonly?: boolean } = {}
+): Database.Database {
+  if (!existsSync(dbPath)) {
+    throw new UsageError(`Health sedentary database does not exist: ${dbPath}.`);
+  }
+
+  return new Database(
+    dbPath,
+    options.readonly === true ? { readonly: true, fileMustExist: true } : { fileMustExist: true }
+  );
+}
+
+function parseSedentaryState(value: string): SedentaryState {
+  if (value === "active" || value === "idle" || value === "unknown") {
+    return value;
+  }
+
+  throw new UsageError(`Invalid --state value "${value}". Expected active, idle, or unknown.`);
+}
+
+function parseCliBoolean(value: string, optionName: string): boolean {
+  if (value === "true") {
+    return true;
+  }
+  if (value === "false") {
+    return false;
+  }
+
+  throw new UsageError(`Invalid ${optionName} value "${value}". Expected true or false.`);
+}
+
+function assertCliInstantRange(from: string, to: string, toOptionName: string, fromOptionName = "--from"): void {
+  if (to <= from) {
+    throw new UsageError(`Invalid ${toOptionName} value "${to}". Expected an ISO instant after ${fromOptionName}.`);
+  }
+}
+
 function parseMetricNumber(value: string, optionName: string): number {
   const trimmed = value.trim();
   const parsed = Number(trimmed);
@@ -2460,6 +2690,19 @@ function parsePositiveSafeInteger(value: string, optionName: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     throw new UsageError(`Invalid ${optionName} value "${value}". Expected a positive safe integer.`);
+  }
+
+  return parsed;
+}
+
+function parseNonNegativeSafeInteger(value: string, optionName: string): number {
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a non-negative safe integer.`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new UsageError(`Invalid ${optionName} value "${value}". Expected a non-negative safe integer.`);
   }
 
   return parsed;

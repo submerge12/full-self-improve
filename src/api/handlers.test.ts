@@ -13,6 +13,7 @@ import {
   createExerciseTemplate
 } from "../health-extensions/exercise.js";
 import { createHealthMetric } from "../health-extensions/metrics.js";
+import { ingestSedentarySpan } from "../health-extensions/sedentary.js";
 import type { ApiRouteId } from "./contracts.js";
 import { handleApiRequest, type ApiHandlerContext, type ApiRequest } from "./handlers.js";
 
@@ -660,6 +661,197 @@ describe("pure API request handlers", () => {
       ok: false,
       error: { code: "invalid_request_body", routeId }
     });
+  });
+
+  test.each([
+    ["span ingest", "POST", "/api/health/sedentary/spans", {}, "health.sedentary.spans.ingest"],
+    [
+      "summary",
+      "GET",
+      "/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z",
+      undefined,
+      "health.sedentary.summary"
+    ],
+    [
+      "break-reminder evaluation",
+      "POST",
+      "/api/health/break-reminders/evaluate",
+      {},
+      "health.break-reminders.evaluate"
+    ]
+  ])("sedentary %s route rejects missing bearer auth", async (_name, method, path, body, routeId) => {
+    const response = await handleApiRequest(request(method as ApiRequest["method"], path, body), context());
+
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId }
+    });
+  });
+
+  test("POST /api/health/sedentary/spans ingests a Windows logger span", async () => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/sedentary/spans", {
+        sourceId: " windows-logger:span-1 ",
+        spanStart: "2026-06-15T01:00:00.000Z",
+        spanEnd: "2026-06-15T02:00:00.000Z",
+        state: "idle",
+        confidence: 0.95,
+        receivedAt: "2026-06-15T02:00:02.000Z"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.sedentary.spans.ingest" });
+    const data = responseData<SedentarySpanIngestData>(response);
+    expect(data.span).toEqual({
+      id: 1,
+      sourceId: "windows-logger:span-1",
+      spanStart: "2026-06-15T01:00:00.000Z",
+      spanEnd: "2026-06-15T02:00:00.000Z",
+      state: "idle",
+      confidence: 0.95,
+      receivedAt: "2026-06-15T02:00:02.000Z"
+    });
+    expect(countRows("sedentary_spans")).toBe(1);
+  });
+
+  test("GET /api/health/sedentary/summary computes a bounded sedentary summary", async () => {
+    seedSedentarySpan("idle-1", "2026-06-15T00:00:00.000Z", "2026-06-15T00:50:00.000Z", "idle");
+    seedSedentarySpan("active-short", "2026-06-15T00:50:00.000Z", "2026-06-15T00:53:00.000Z", "active");
+    seedSedentarySpan("idle-2", "2026-06-15T00:53:00.000Z", "2026-06-15T01:10:00.000Z", "idle");
+    seedSedentarySpan("unknown-gap", "2026-06-15T01:10:00.000Z", "2026-06-15T01:20:00.000Z", "unknown");
+    seedSedentarySpan("idle-3", "2026-06-15T01:20:00.000Z", "2026-06-15T01:35:00.000Z", "idle");
+
+    const response = await handleApiRequest(
+      authRequest(
+        "GET",
+        "/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:35:00.000Z&activeBreakMinutes=5&mergeUnknownGaps=true"
+      ),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.sedentary.summary" });
+    const data = responseData<SedentarySummaryData>(response);
+    expect(data.summary).toMatchObject({
+      from: "2026-06-15T00:00:00.000Z",
+      to: "2026-06-15T01:35:00.000Z",
+      idleMinutes: 82,
+      activeMinutes: 3,
+      unknownMinutes: 10,
+      longestIdleStreakMinutes: 95,
+      currentIdleStreakMinutes: 95
+    });
+    expect(data.summary.idleStreaks.map((streak) => [streak.windowStart, streak.windowEnd, streak.durationMinutes])).toEqual([
+      ["2026-06-15T00:00:00.000Z", "2026-06-15T01:35:00.000Z", 95]
+    ]);
+    expect(data.summary.spans.map((span) => span.sourceId)).toEqual([
+      "idle-1",
+      "active-short",
+      "idle-2",
+      "unknown-gap",
+      "idle-3"
+    ]);
+  });
+
+  test("POST /api/health/break-reminders/evaluate persists an eligible reminder", async () => {
+    seedSedentarySpan("idle-65", "2026-06-15T10:00:00.000Z", "2026-06-15T11:05:00.000Z", "idle");
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/break-reminders/evaluate", {
+        from: "2026-06-15T10:00:00.000Z",
+        to: "2026-06-15T11:05:00.000Z",
+        thresholdMinutes: 60,
+        cooldownMinutes: 0,
+        evaluatedAt: "2026-06-15T11:05:00.000Z",
+        activeBreakMinutes: 5,
+        mergeUnknownGaps: false,
+        deliveryChannel: "desktop-toast"
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.break-reminders.evaluate" });
+    const data = responseData<BreakReminderEvaluateData>(response);
+    expect(data.result).toMatchObject({
+      status: "eligible",
+      summary: {
+        currentIdleStreakMinutes: 65,
+        longestIdleStreakMinutes: 65
+      },
+      streak: {
+        windowStart: "2026-06-15T10:00:00.000Z",
+        windowEnd: "2026-06-15T11:05:00.000Z",
+        durationMinutes: 65,
+        computedAt: "2026-06-15T11:05:00.000Z"
+      },
+      reminder: {
+        eligibleAt: "2026-06-15T11:00:00.000Z",
+        status: "eligible",
+        reason: "sedentary streak reached 60 minutes",
+        deliveryChannel: "desktop-toast"
+      }
+    });
+    expect(countRows("sedentary_streaks")).toBe(1);
+    expect(countRows("break_reminders")).toBe(1);
+  });
+
+  test.each([
+    ["span body", "POST", "/api/health/sedentary/spans", { sourceId: "span", spanStart: "bad" }, "health.sedentary.spans.ingest"],
+    [
+      "summary missing to",
+      "GET",
+      "/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z",
+      undefined,
+      "health.sedentary.summary"
+    ],
+    [
+      "summary interval",
+      "GET",
+      "/api/health/sedentary/summary?from=2026-06-15T01:00:00.000Z&to=2026-06-15T01:00:00.000Z",
+      undefined,
+      "health.sedentary.summary"
+    ],
+    [
+      "summary active break option",
+      "GET",
+      "/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z&activeBreakMinutes=1.5",
+      undefined,
+      "health.sedentary.summary"
+    ],
+    [
+      "evaluation body",
+      "POST",
+      "/api/health/break-reminders/evaluate",
+      { from: "2026-06-15T10:00:00.000Z", to: "2026-06-15T11:05:00.000Z", thresholdMinutes: 0 },
+      "health.break-reminders.evaluate"
+    ],
+    [
+      "evaluation boolean option",
+      "POST",
+      "/api/health/break-reminders/evaluate",
+      { from: "2026-06-15T10:00:00.000Z", to: "2026-06-15T11:05:00.000Z", mergeUnknownGaps: "true" },
+      "health.break-reminders.evaluate"
+    ]
+  ])("sedentary endpoint returns 400 for malformed %s", async (_name, method, path, body, routeId) => {
+    seedSedentarySpan("idle-existing", "2026-06-15T10:00:00.000Z", "2026-06-15T11:05:00.000Z", "idle");
+    const spansBefore = countRows("sedentary_spans");
+    const streaksBefore = countRows("sedentary_streaks");
+    const remindersBefore = countRows("break_reminders");
+
+    const response = await handleApiRequest(authRequest(method as ApiRequest["method"], path, body), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId }
+    });
+    expect(countRows("sedentary_spans")).toBe(spansBefore);
+    expect(countRows("sedentary_streaks")).toBe(streaksBefore);
+    expect(countRows("break_reminders")).toBe(remindersBefore);
   });
 
   test("GET /api/plan/today is idempotent for the same date and persists trace events", async () => {
@@ -1379,6 +1571,21 @@ describe("pure API request handlers", () => {
     });
   }
 
+  function seedSedentarySpan(
+    sourceId: string,
+    spanStart: string,
+    spanEnd: string,
+    state: "active" | "idle" | "unknown"
+  ): void {
+    ingestSedentarySpan(db, {
+      sourceId,
+      spanStart,
+      spanEnd,
+      state,
+      confidence: 0.9
+    });
+  }
+
   function countRows(table: string): number {
     return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
   }
@@ -1714,5 +1921,59 @@ interface ExerciseCompletionData extends Record<string, unknown> {
       status: string;
       completedAt?: string;
     }>;
+  };
+}
+
+interface SedentarySpanIngestData extends Record<string, unknown> {
+  span: {
+    id: number;
+    sourceId: string;
+    spanStart: string;
+    spanEnd: string;
+    state: string;
+    confidence?: number;
+    receivedAt: string;
+  };
+}
+
+interface SedentarySummaryData extends Record<string, unknown> {
+  summary: {
+    from: string;
+    to: string;
+    idleMinutes: number;
+    activeMinutes: number;
+    unknownMinutes: number;
+    longestIdleStreakMinutes: number;
+    currentIdleStreakMinutes: number;
+    idleStreaks: Array<{
+      windowStart: string;
+      windowEnd: string;
+      durationMinutes: number;
+    }>;
+    spans: Array<{
+      sourceId?: string;
+    }>;
+  };
+}
+
+interface BreakReminderEvaluateData extends Record<string, unknown> {
+  result: {
+    status: string;
+    summary: {
+      currentIdleStreakMinutes: number;
+      longestIdleStreakMinutes: number;
+    };
+    streak?: {
+      windowStart: string;
+      windowEnd: string;
+      durationMinutes: number;
+      computedAt: string;
+    };
+    reminder?: {
+      eligibleAt: string;
+      status: string;
+      reason: string;
+      deliveryChannel?: string;
+    };
   };
 }

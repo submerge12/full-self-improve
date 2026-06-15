@@ -19,14 +19,20 @@ import {
   insertExercisePlan,
   insertExerciseSession,
   insertExerciseTemplate,
+  findBreakReminderByStreakAndEligibleAt,
+  findBreakReminderByStreakStartAndEligibleAt,
   listExerciseSessionsForCompletion,
+  findSedentarySpanBySourceId,
+  findSedentaryStreakByProjection,
   insertHealthMetric,
   insertHealthTraceEvent,
   insertMetricAuditEvent,
   insertMetricImportRecord,
   insertSedentarySpan,
   insertSedentaryStreak,
+  listEligibleBreakRemindersNear,
   listHealthMetrics,
+  listSedentarySpansForWindow,
   updateExerciseSessionCompletion
 } from "./store.js";
 
@@ -474,6 +480,39 @@ describe("health extension store", () => {
 
       expect(streak.sourceSpanIds).toEqual([span.id]);
       expect(reminder.streakId).toBe(streak.id);
+      expect(findSedentarySpanBySourceId(db, "watch-span-1")).toMatchObject({ id: span.id });
+      expect(
+        listSedentarySpansForWindow(db, {
+          from: "2026-06-14T00:00:00.000Z",
+          to: "2026-06-15T00:00:00.000Z"
+        })
+      ).toMatchObject([{ id: span.id }]);
+      expect(
+        findSedentaryStreakByProjection(db, {
+          windowStart: span.spanStart,
+          windowEnd: span.spanEnd,
+          durationMinutes: 60,
+          sourceSpanIds: [span.id]
+        })
+      ).toMatchObject({ id: streak.id });
+      expect(findBreakReminderByStreakAndEligibleAt(db, streak.id, "2026-06-14T02:30:00.000Z")).toMatchObject({
+        id: reminder.id
+      });
+      expect(
+        findBreakReminderByStreakStartAndEligibleAt(db, {
+          windowStart: span.spanStart,
+          eligibleAt: "2026-06-14T02:30:00.000Z"
+        })
+      ).toMatchObject({
+        streak: { id: streak.id },
+        reminder: { id: reminder.id }
+      });
+      expect(
+        listEligibleBreakRemindersNear(db, {
+          eligibleAt: "2026-06-14T02:45:00.000Z",
+          cooldownMinutes: 30
+        })
+      ).toMatchObject([{ id: reminder.id }]);
     } finally {
       db.close();
     }

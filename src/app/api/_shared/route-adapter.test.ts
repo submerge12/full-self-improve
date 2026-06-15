@@ -173,6 +173,7 @@ describe("Next app route adapter", () => {
   test("actual health route modules export the expected HTTP method functions", async () => {
     const { metrics, metricsImport } = await importHealthRouteModules();
     const { templates, plans, sessionsComplete, completion } = await importHealthExerciseRouteModules();
+    const { sedentarySpans, sedentarySummary, breakReminderEvaluate } = await importSedentaryRouteModules();
 
     expect(exportKeys(metrics)).toEqual(["GET", "PATCH", "POST", "runtime"]);
     expect(metrics.POST).toEqual(expect.any(Function));
@@ -188,6 +189,12 @@ describe("Next app route adapter", () => {
     expect(sessionsComplete.POST).toEqual(expect.any(Function));
     expect(exportKeys(completion)).toEqual(["GET", "runtime"]);
     expect(completion.GET).toEqual(expect.any(Function));
+    expect(exportKeys(sedentarySpans)).toEqual(["POST", "runtime"]);
+    expect(sedentarySpans.POST).toEqual(expect.any(Function));
+    expect(exportKeys(sedentarySummary)).toEqual(["GET", "runtime"]);
+    expect(sedentarySummary.GET).toEqual(expect.any(Function));
+    expect(exportKeys(breakReminderEvaluate)).toEqual(["POST", "runtime"]);
+    expect(breakReminderEvaluate.POST).toEqual(expect.any(Function));
   });
 
   test("actual route modules force the Node.js runtime", () => {
@@ -207,6 +214,7 @@ describe("Next app route adapter", () => {
   test("actual health route modules force the Node.js runtime", async () => {
     const { metrics, metricsImport } = await importHealthRouteModules();
     const { templates, plans, sessionsComplete, completion } = await importHealthExerciseRouteModules();
+    const { sedentarySpans, sedentarySummary, breakReminderEvaluate } = await importSedentaryRouteModules();
 
     expect(metrics.runtime).toBe("nodejs");
     expect(metricsImport.runtime).toBe("nodejs");
@@ -214,6 +222,9 @@ describe("Next app route adapter", () => {
     expect(plans.runtime).toBe("nodejs");
     expect(sessionsComplete.runtime).toBe("nodejs");
     expect(completion.runtime).toBe("nodejs");
+    expect(sedentarySpans.runtime).toBe("nodejs");
+    expect(sedentarySummary.runtime).toBe("nodejs");
+    expect(breakReminderEvaluate.runtime).toBe("nodejs");
   });
 
   test("actual protected route modules accept bearer-authenticated Web requests", async () => {
@@ -426,6 +437,50 @@ describe("Next app route adapter", () => {
     expect(summaryBody.data.summary).toMatchObject({ planned: 2, completed: 1, missed: 1, rate: 0.5 });
   });
 
+  test("actual sedentary route modules accept bearer-authenticated Web requests", async () => {
+    const { sedentarySpans, sedentarySummary, breakReminderEvaluate } = await importSedentaryRouteModules();
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-sedentary-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const ingestResponse = await sedentarySpans.POST(
+      jsonRequest("https://example.test/api/health/sedentary/spans", {
+        sourceId: "windows-logger:route-span",
+        spanStart: "2026-06-15T10:00:00.000Z",
+        spanEnd: "2026-06-15T11:05:00.000Z",
+        state: "idle",
+        confidence: 0.9,
+        receivedAt: "2026-06-15T11:05:01.000Z"
+      })
+    );
+    const summaryResponse = await sedentarySummary.GET(
+      new Request("https://example.test/api/health/sedentary/summary?from=2026-06-15T10:00:00.000Z&to=2026-06-15T11:05:00.000Z", {
+        headers: { authorization: "Bearer env-secret" }
+      })
+    );
+    const evaluateResponse = await breakReminderEvaluate.POST(
+      jsonRequest("https://example.test/api/health/break-reminders/evaluate", {
+        from: "2026-06-15T10:00:00.000Z",
+        to: "2026-06-15T11:05:00.000Z",
+        evaluatedAt: "2026-06-15T11:05:00.000Z",
+        thresholdMinutes: 60
+      })
+    );
+    const responses = [ingestResponse, summaryResponse, evaluateResponse];
+    const summaryBody = (await summaryResponse.clone().json()) as {
+      data: { summary: { currentIdleStreakMinutes: number } };
+    };
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+    await expectResponseRouteIds(responses, [
+      "health.sedentary.spans.ingest",
+      "health.sedentary.summary",
+      "health.break-reminders.evaluate"
+    ]);
+    expect(summaryBody.data.summary).toMatchObject({ currentIdleStreakMinutes: 65 });
+  });
+
   test("actual protected route modules reject missing configured bearer tokens before body handling", async () => {
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-auth-config-${Date.now()}.db`);
     tempFiles.push(dbPath);
@@ -469,6 +524,7 @@ describe("Next app route adapter", () => {
   test("actual mutation route modules reject unauthenticated Web requests before body handling", async () => {
     const { metrics, metricsImport } = await importHealthRouteModules();
     const { templates, plans, sessionsComplete } = await importHealthExerciseRouteModules();
+    const { sedentarySpans, breakReminderEvaluate } = await importSedentaryRouteModules();
     const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-mutations-${Date.now()}.db`);
     tempFiles.push(dbPath);
     process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
@@ -512,6 +568,16 @@ describe("Next app route adapter", () => {
         routeId: "health.exercise.sessions.complete",
         handler: sessionsComplete.POST,
         url: "https://example.test/api/health/exercise/sessions/complete"
+      },
+      {
+        routeId: "health.sedentary.spans.ingest",
+        handler: sedentarySpans.POST,
+        url: "https://example.test/api/health/sedentary/spans"
+      },
+      {
+        routeId: "health.break-reminders.evaluate",
+        handler: breakReminderEvaluate.POST,
+        url: "https://example.test/api/health/break-reminders/evaluate"
       }
     ] as const;
 
@@ -557,6 +623,40 @@ describe("Next app route adapter", () => {
     expect(await templateResponse.json()).toMatchObject({
       ok: false,
       error: { code: "unauthorized", routeId: "health.exercise.templates.create" }
+    });
+  });
+
+  test("actual sedentary mutation route modules reject unauthenticated query requests before body handling", async () => {
+    const { sedentarySpans, breakReminderEvaluate } = await importSedentaryRouteModules();
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-sedentary-query-auth-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const ingestResponse = await sedentarySpans.POST(
+      new Request("https://example.test/api/health/sedentary/spans?source=windows", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"sourceId\":"
+      })
+    );
+    const evaluateResponse = await breakReminderEvaluate.POST(
+      new Request("https://example.test/api/health/break-reminders/evaluate?mode=check", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{\"from\":"
+      })
+    );
+
+    expect(ingestResponse.status).toBe(401);
+    expect(await ingestResponse.json()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "health.sedentary.spans.ingest" }
+    });
+    expect(evaluateResponse.status).toBe(401);
+    expect(await evaluateResponse.json()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "health.break-reminders.evaluate" }
     });
   });
 
@@ -839,6 +939,16 @@ interface ExerciseCompletionRouteModule {
   readonly GET: AppRouteHandler;
 }
 
+interface SedentaryPostRouteModule {
+  readonly runtime: string;
+  readonly POST: AppRouteHandler;
+}
+
+interface SedentarySummaryRouteModule {
+  readonly runtime: string;
+  readonly GET: AppRouteHandler;
+}
+
 async function importHealthExerciseRouteModules(): Promise<{
   readonly templates: ExercisePostRouteModule;
   readonly plans: ExercisePostRouteModule;
@@ -853,4 +963,18 @@ async function importHealthExerciseRouteModules(): Promise<{
   const completion = (await import("../health/exercise/completion/route.js")) as ExerciseCompletionRouteModule;
 
   return { templates, plans, sessionsComplete, completion };
+}
+
+async function importSedentaryRouteModules(): Promise<{
+  readonly sedentarySpans: SedentaryPostRouteModule;
+  readonly sedentarySummary: SedentarySummaryRouteModule;
+  readonly breakReminderEvaluate: SedentaryPostRouteModule;
+}> {
+  const sedentarySpans = (await import("../health/sedentary/spans/route.js")) as SedentaryPostRouteModule;
+  const sedentarySummary = (await import("../health/sedentary/summary/route.js")) as SedentarySummaryRouteModule;
+  const breakReminderEvaluate = (await import(
+    "../health/break-reminders/evaluate/route.js"
+  )) as SedentaryPostRouteModule;
+
+  return { sedentarySpans, sedentarySummary, breakReminderEvaluate };
 }

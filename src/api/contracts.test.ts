@@ -42,12 +42,30 @@ const expectedRoutes = [
     method: "GET",
     path: "/api/health/exercise/completion?from=...&to=...",
     auth: "bearer"
+  },
+  {
+    id: "health.sedentary.spans.ingest",
+    method: "POST",
+    path: "/api/health/sedentary/spans",
+    auth: "bearer"
+  },
+  {
+    id: "health.sedentary.summary",
+    method: "GET",
+    path: "/api/health/sedentary/summary?from=...&to=...",
+    auth: "bearer"
+  },
+  {
+    id: "health.break-reminders.evaluate",
+    method: "POST",
+    path: "/api/health/break-reminders/evaluate",
+    auth: "bearer"
   }
 ] as const;
 
 describe("API route manifest", () => {
   test("contains exactly the documented API endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(19);
+    expect(API_ROUTE_MANIFEST).toHaveLength(22);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -65,7 +83,7 @@ describe("API route manifest", () => {
   test("requires bearer auth for every mutation route", () => {
     const mutationRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST" || route.method === "PATCH");
 
-    expect(mutationRoutes).toHaveLength(13);
+    expect(mutationRoutes).toHaveLength(15);
     expect(mutationRoutes.every((route) => route.auth === "bearer")).toBe(true);
   });
 
@@ -123,6 +141,26 @@ describe("API route manifest", () => {
       findApiRoute("GET", "https://evil.test/api/health/exercise/completion?from=2026-06-15&to=2026-06-22")
     ).toBeUndefined();
     expect(findApiRoute("GET", "//evil.test/api/health/exercise/completion?from=2026-06-15&to=2026-06-22")).toBeUndefined();
+
+    expect(findApiRoute("POST", "/api/health/sedentary/spans")?.id).toBe("health.sedentary.spans.ingest");
+    expect(findApiRoute("GET", "/api/health/sedentary/spans")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/sedentary/spans?source=windows")).toBeUndefined();
+    expect(findApiRoute("GET", "/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z")?.id).toBe(
+      "health.sedentary.summary"
+    );
+    expect(findApiRoute("GET", "/api/health/sedentary/summary")?.id).toBe("health.sedentary.summary");
+    expect(findApiRoute("POST", "/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z")).toBeUndefined();
+    expect(findApiRoute("GET", "api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z")).toBeUndefined();
+    expect(
+      findApiRoute(
+        "GET",
+        "https://evil.test/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z"
+      )
+    ).toBeUndefined();
+    expect(findApiRoute("GET", "//evil.test/api/health/sedentary/summary?from=2026-06-15T00:00:00.000Z&to=2026-06-15T01:00:00.000Z")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/break-reminders/evaluate")?.id).toBe("health.break-reminders.evaluate");
+    expect(findApiRoute("GET", "/api/health/break-reminders/evaluate")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/break-reminders/evaluate?mode=check")).toBeUndefined();
   });
 });
 

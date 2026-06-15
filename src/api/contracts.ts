@@ -40,7 +40,10 @@ export const API_ROUTE_IDS = [
   "health.exercise.templates.create",
   "health.exercise.plans.create",
   "health.exercise.sessions.complete",
-  "health.exercise.completion"
+  "health.exercise.completion",
+  "health.sedentary.spans.ingest",
+  "health.sedentary.summary",
+  "health.break-reminders.evaluate"
 ] as const;
 
 export type ApiRouteId = (typeof API_ROUTE_IDS)[number];
@@ -186,6 +189,27 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/health/exercise/completion?from=...&to=...",
     auth: "bearer",
     description: "Summarize planned and ad hoc exercise completion for a required date window."
+  },
+  {
+    id: "health.sedentary.spans.ingest",
+    method: "POST",
+    path: "/api/health/sedentary/spans",
+    auth: "bearer",
+    description: "Ingest one sedentary span from the Windows logger."
+  },
+  {
+    id: "health.sedentary.summary",
+    method: "GET",
+    path: "/api/health/sedentary/summary?from=...&to=...",
+    auth: "bearer",
+    description: "Summarize sedentary, active, and unknown minutes for a required instant window."
+  },
+  {
+    id: "health.break-reminders.evaluate",
+    method: "POST",
+    path: "/api/health/break-reminders/evaluate",
+    auth: "bearer",
+    description: "Evaluate whether the current sedentary streak is eligible for a break reminder."
   }
 ] as const satisfies readonly ApiRouteManifestEntry[];
 
@@ -323,6 +347,16 @@ function routeMatchesPath(route: ApiRouteManifestEntry, path: string): boolean {
     const url = parseApiPath(path);
 
     return url?.pathname === "/api/health/exercise/completion";
+  }
+
+  if (route.id === "health.sedentary.summary") {
+    if (!isLocalApiPathString(path)) {
+      return false;
+    }
+
+    const url = parseApiPath(path);
+
+    return url?.pathname === "/api/health/sedentary/summary";
   }
 
   return false;

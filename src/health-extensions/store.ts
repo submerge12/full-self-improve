@@ -65,6 +65,38 @@ export interface ExerciseSessionCompletionWindow {
   readonly adHocSessions: readonly StoredExerciseSession[];
 }
 
+export interface SedentarySpanReservation {
+  readonly span: StoredSedentarySpan;
+  readonly created: boolean;
+}
+
+export interface SedentarySpanWindowQuery {
+  readonly from: string;
+  readonly to: string;
+}
+
+export interface SedentaryStreakProjectionQuery {
+  readonly windowStart: string;
+  readonly windowEnd: string;
+  readonly durationMinutes: number;
+  readonly sourceSpanIds: readonly number[];
+}
+
+export interface BreakReminderCooldownQuery {
+  readonly eligibleAt: string;
+  readonly cooldownMinutes: number;
+}
+
+export interface BreakReminderStreakStartQuery {
+  readonly windowStart: string;
+  readonly eligibleAt: string;
+}
+
+export interface BreakReminderWithStreak {
+  readonly streak: StoredSedentaryStreak;
+  readonly reminder: StoredBreakReminder;
+}
+
 export function insertHealthMetric(
   db: Database.Database,
   input: HealthMetricInput,
@@ -482,6 +514,75 @@ export function insertSedentarySpan(db: Database.Database, input: SedentarySpanI
   return mapSedentarySpanRow(row);
 }
 
+export function reserveSedentarySpanBySourceId(
+  db: Database.Database,
+  input: SedentarySpanInput & { readonly sourceId: string }
+): SedentarySpanReservation {
+  const row = db
+    .prepare(
+      `INSERT INTO sedentary_spans (source_id, span_start, span_end, state, confidence, received_at)
+       VALUES (@sourceId, @spanStart, @spanEnd, @state, @confidence, @receivedAt)
+       ON CONFLICT(source_id) DO NOTHING
+       RETURNING id, source_id, span_start, span_end, state, confidence, received_at, created_at, updated_at`
+    )
+    .get({
+      sourceId: assertSafeText(input.sourceId, "sourceId"),
+      spanStart: assertIsoInstant(input.spanStart, "spanStart"),
+      spanEnd: assertIsoInstant(input.spanEnd, "spanEnd"),
+      state: input.state,
+      confidence: input.confidence === undefined ? null : assertConfidence(input.confidence, "confidence"),
+      receivedAt: assertIsoInstant(input.receivedAt, "receivedAt")
+    }) as SedentarySpanRow | undefined;
+
+  if (row !== undefined) {
+    return { span: mapSedentarySpanRow(row), created: true };
+  }
+
+  const existing = findSedentarySpanBySourceId(db, input.sourceId);
+  if (existing === undefined) {
+    throw new Error("sedentary span insert did not return or find a row");
+  }
+  return { span: existing, created: false };
+}
+
+export function findSedentarySpanBySourceId(
+  db: Database.Database,
+  sourceId: string
+): StoredSedentarySpan | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, source_id, span_start, span_end, state, confidence, received_at, created_at, updated_at
+       FROM sedentary_spans
+       WHERE source_id = ?`
+    )
+    .get(assertSafeText(sourceId, "sourceId")) as SedentarySpanRow | undefined;
+
+  return row === undefined ? undefined : mapSedentarySpanRow(row);
+}
+
+export function listSedentarySpansForWindow(
+  db: Database.Database,
+  query: SedentarySpanWindowQuery
+): StoredSedentarySpan[] {
+  const from = assertIsoInstant(query.from, "from");
+  const to = assertIsoInstant(query.to, "to");
+  if (to <= from) {
+    throw new Error("to must be after from");
+  }
+
+  const rows = db
+    .prepare(
+      `SELECT id, source_id, span_start, span_end, state, confidence, received_at, created_at, updated_at
+       FROM sedentary_spans
+       WHERE span_end > @from
+         AND span_start < @to
+       ORDER BY span_start ASC, span_end ASC, id ASC`
+    )
+    .all({ from, to }) as SedentarySpanRow[];
+
+  return rows.map(mapSedentarySpanRow);
+}
+
 export function insertSedentaryStreak(db: Database.Database, input: SedentaryStreakInput): StoredSedentaryStreak {
   const row = db
     .prepare(
@@ -498,6 +599,31 @@ export function insertSedentaryStreak(db: Database.Database, input: SedentaryStr
     }) as SedentaryStreakRow;
 
   return mapSedentaryStreakRow(row);
+}
+
+export function findSedentaryStreakByProjection(
+  db: Database.Database,
+  query: SedentaryStreakProjectionQuery
+): StoredSedentaryStreak | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, window_start, window_end, duration_minutes, source_span_ids, computed_at, created_at, updated_at
+       FROM sedentary_streaks
+       WHERE window_start = @windowStart
+         AND window_end = @windowEnd
+         AND duration_minutes = @durationMinutes
+         AND source_span_ids = @sourceSpanIds
+       ORDER BY id ASC
+       LIMIT 1`
+    )
+    .get({
+      windowStart: assertIsoInstant(query.windowStart, "windowStart"),
+      windowEnd: assertIsoInstant(query.windowEnd, "windowEnd"),
+      durationMinutes: assertPositiveInteger(query.durationMinutes, "durationMinutes"),
+      sourceSpanIds: stringifyJsonPositiveIntegerArray(query.sourceSpanIds, "sourceSpanIds")
+    }) as SedentaryStreakRow | undefined;
+
+  return row === undefined ? undefined : mapSedentaryStreakRow(row);
 }
 
 export function insertBreakReminder(db: Database.Database, input: BreakReminderInput): StoredBreakReminder {
@@ -517,6 +643,89 @@ export function insertBreakReminder(db: Database.Database, input: BreakReminderI
     }) as BreakReminderRow;
 
   return mapBreakReminderRow(row);
+}
+
+export function findBreakReminderByStreakAndEligibleAt(
+  db: Database.Database,
+  streakId: number,
+  eligibleAt: string
+): StoredBreakReminder | undefined {
+  const row = db
+    .prepare(
+      `SELECT id, streak_id, eligible_at, status, reason, delivered_at, delivery_channel, created_at, updated_at
+       FROM break_reminders
+       WHERE streak_id = @streakId
+         AND eligible_at = @eligibleAt`
+    )
+    .get({
+      streakId: assertPositiveInteger(streakId, "streakId"),
+      eligibleAt: assertIsoInstant(eligibleAt, "eligibleAt")
+    }) as BreakReminderRow | undefined;
+
+  return row === undefined ? undefined : mapBreakReminderRow(row);
+}
+
+export function findBreakReminderByStreakStartAndEligibleAt(
+  db: Database.Database,
+  query: BreakReminderStreakStartQuery
+): BreakReminderWithStreak | undefined {
+  const eligibleAt = assertIsoInstant(query.eligibleAt, "eligibleAt");
+  const row = db
+    .prepare(
+      `SELECT
+         sedentary_streaks.id,
+         sedentary_streaks.window_start,
+         sedentary_streaks.window_end,
+         sedentary_streaks.duration_minutes,
+         sedentary_streaks.source_span_ids,
+         sedentary_streaks.computed_at,
+         sedentary_streaks.created_at,
+         sedentary_streaks.updated_at
+       FROM sedentary_streaks
+       INNER JOIN break_reminders ON break_reminders.streak_id = sedentary_streaks.id
+       WHERE sedentary_streaks.window_start = @windowStart
+         AND break_reminders.eligible_at = @eligibleAt
+       ORDER BY break_reminders.id ASC
+       LIMIT 1`
+    )
+    .get({
+      windowStart: assertIsoInstant(query.windowStart, "windowStart"),
+      eligibleAt
+    }) as SedentaryStreakRow | undefined;
+
+  if (row === undefined) {
+    return undefined;
+  }
+
+  const streak = mapSedentaryStreakRow(row);
+  const reminder = findBreakReminderByStreakAndEligibleAt(db, streak.id, eligibleAt);
+  if (reminder === undefined) {
+    throw new Error("break reminder lookup joined a missing reminder");
+  }
+  return { streak, reminder };
+}
+
+export function listEligibleBreakRemindersNear(
+  db: Database.Database,
+  query: BreakReminderCooldownQuery
+): StoredBreakReminder[] {
+  const eligibleAtMs = Date.parse(assertIsoInstant(query.eligibleAt, "eligibleAt"));
+  const cooldownMinutes = assertNonNegativeInteger(query.cooldownMinutes, "cooldownMinutes");
+  const cooldownMs = cooldownMinutes * 60 * 1000;
+  const from = new Date(eligibleAtMs - cooldownMs).toISOString();
+  const to = new Date(eligibleAtMs).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT id, streak_id, eligible_at, status, reason, delivered_at, delivery_channel, created_at, updated_at
+       FROM break_reminders
+       WHERE status = 'eligible'
+         AND eligible_at >= @from
+         AND eligible_at <= @to
+       ORDER BY eligible_at ASC, id ASC`
+    )
+    .all({ from, to }) as BreakReminderRow[];
+
+  return rows.map(mapBreakReminderRow);
 }
 
 export function insertCoachDigestSnapshot(

@@ -1,4 +1,5 @@
 import type { AgentDryRunPlan, AgentEndpointPlan, AgentIntendedAction } from "./dry-run.js";
+import { CoachReportRenderError, renderCoachHealthDigestBody } from "./coach-report.js";
 import { redactEndpointReference, redactText } from "./http-clients.js";
 import { renderScholarMasteryReportBody } from "./mastery-report.js";
 
@@ -89,6 +90,10 @@ export async function executeAgentPlan(
     }
   }
 
+  if (plan.role === "coach" && plan.phase === "daily-health") {
+    return executeCoachDailyHealthPlan(plan, reads, clients);
+  }
+
   let actionsToPublish: readonly AgentIntendedAction[];
   try {
     actionsToPublish = actionsForPublish(plan, reads);
@@ -140,6 +145,99 @@ export async function executeAgentPlan(
   };
 }
 
+async function executeCoachDailyHealthPlan(
+  plan: AgentDryRunPlan,
+  readResults: readonly AgentReadResult[],
+  clients: AgentExecutionClients
+): Promise<AgentExecutionResult> {
+  const boardClient = requireClient(clients.boardClient, "boardClient");
+  const digestRead = digestGenerateReadFor(readResults);
+  const publishedActions: AgentPublishResult[] = [];
+  let actionsToPublish: readonly AgentIntendedAction[] = [];
+
+  if (digestRead === undefined) {
+    const endpoint = readResults[0]?.endpoint ?? plan.externalReads[0];
+    if (endpoint === undefined) {
+      throw new CoachReportRenderError("No Coach digest generate read was available.");
+    }
+
+    const blocker = createAgentBlockerAction(
+      plan,
+      endpoint,
+      new CoachReportRenderError("No Coach digest generate read was available.")
+    );
+    let publishedBlocker: AgentPublishResult | undefined;
+    let publishFailure: AgentPublishFailure | undefined;
+    try {
+      publishedBlocker = await boardClient.publish(blocker);
+    } catch (publishError) {
+      publishFailure = createPublishFailure(blocker, publishError, "Agent blocker publish failed");
+    }
+
+    return {
+      mode: "live",
+      status: "blocked",
+      reads: readResults,
+      publishedActions: publishedBlocker === undefined ? [] : [publishedBlocker],
+      publishFailures: publishFailure === undefined ? [] : [publishFailure],
+      blocker
+    };
+  }
+
+  try {
+    actionsToPublish = [coachDigestActionFor(plan, digestRead)];
+    for (const action of actionsToPublish) {
+      publishedActions.push(await boardClient.publish(action));
+    }
+  } catch (error) {
+    if (error instanceof CoachReportRenderError) {
+      const endpoint = digestRead?.endpoint ?? plan.externalReads[0];
+      if (endpoint === undefined) {
+        throw error;
+      }
+
+      const blocker = createAgentBlockerAction(plan, endpoint, error);
+      let publishedBlocker: AgentPublishResult | undefined;
+      let publishFailure: AgentPublishFailure | undefined;
+      try {
+        publishedBlocker = await boardClient.publish(blocker);
+      } catch (publishError) {
+        publishFailure = createPublishFailure(blocker, publishError, "Agent blocker publish failed");
+      }
+
+      return {
+        mode: "live",
+        status: "blocked",
+        reads: readResults,
+        publishedActions: publishedBlocker === undefined ? [] : [publishedBlocker],
+        publishFailures: publishFailure === undefined ? [] : [publishFailure],
+        blocker
+      };
+    }
+
+    const failedAction = actionsToPublish[publishedActions.length];
+    if (failedAction === undefined) {
+      throw error;
+    }
+
+    return {
+      mode: "live",
+      status: "blocked",
+      reads: readResults,
+      publishedActions,
+      publishFailures: [createPublishFailure(failedAction, error, "Agent action publish failed")]
+    };
+  }
+
+  return {
+    mode: "live",
+    status: "completed",
+    reads: readResults,
+    publishedActions,
+    publishFailures: []
+  };
+}
+
 function actionsForPublish(plan: AgentDryRunPlan, reads: readonly AgentReadResult[]): readonly AgentIntendedAction[] {
   if (plan.role !== "scholar" || plan.phase !== "evening-mastery") {
     return plan.intendedActions;
@@ -161,6 +259,37 @@ function actionsForPublish(plan: AgentDryRunPlan, reads: readonly AgentReadResul
         }
       : action
   );
+}
+
+export function digestGenerateReadFor(reads: readonly AgentReadResult[]): AgentReadResult | undefined {
+  return reads.find((read) => isDigestGenerateEndpoint(read.endpoint));
+}
+
+export function coachDigestActionFor(plan: AgentDryRunPlan, digestRead: AgentReadResult): AgentIntendedAction {
+  const action = plan.intendedActions.find((intendedAction) => intendedAction.type === "add_comment");
+  if (action === undefined) {
+    throw new CoachReportRenderError("plan.intendedActions must include a Coach digest comment action.");
+  }
+
+  return {
+    ...action,
+    body: renderCoachHealthDigestBody(digestRead.body, {
+      date: plan.date,
+      sourceEndpointLabel: `${digestRead.endpoint.method} ${digestRead.endpoint.url}`
+    })
+  };
+}
+
+function isDigestGenerateEndpoint(endpoint: AgentEndpointPlan): boolean {
+  if (endpoint.method !== "POST") {
+    return false;
+  }
+
+  try {
+    return new URL(endpoint.url).pathname === "/api/health/coach-digest/generate";
+  } catch {
+    return false;
+  }
 }
 
 function masterySummaryRead(reads: readonly AgentReadResult[]): AgentReadResult | undefined {

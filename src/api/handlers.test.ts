@@ -260,6 +260,217 @@ describe("pure API request handlers", () => {
     expect(countRows("health_trace_events")).toBe(0);
   });
 
+  test("POST /api/health/coach-digest/publish dry-run returns the intended action without marking the snapshot published", async () => {
+    const generated = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        offline: true
+      }),
+      context({ now: () => new Date("2026-06-15T12:34:56.000Z") })
+    );
+    const snapshotId = responseData<CoachDigestGenerateData>(generated).result.snapshot.id;
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/publish", {
+        snapshotId,
+        dryRun: true
+      }),
+      context({ now: () => new Date("2026-06-15T13:00:00.000Z") })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.coach-digest.publish" });
+    const data = responseData<CoachDigestPublishData>(response);
+    expect(data.result).toMatchObject({
+      snapshotId,
+      status: "dry_run",
+      intendedAction: {
+        target: "multica",
+        type: "add_comment",
+        title: "Coach health digest for 2026-06-15",
+        body: expect.stringContaining("# Coach daily health digest"),
+        checklist: [],
+        sourceEndpoints: ["POST /api/health/coach-digest/publish"]
+      }
+    });
+    expect(data.result.intendedAction).not.toHaveProperty("sourceHash");
+    expect(data.result.intendedAction).not.toHaveProperty("renderedMarkdown");
+    expect(JSON.stringify(response.body)).not.toMatch(/M4.*complete/i);
+    expect(readCoachDigestSnapshot(snapshotId)).toMatchObject({
+      publishedAt: null,
+      publishResultJson: null
+    });
+  });
+
+  test("POST /api/health/coach-digest/publish live publish without an injected publisher returns blocked without marking the snapshot published", async () => {
+    const generated = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        offline: true
+      }),
+      context()
+    );
+    const snapshotId = responseData<CoachDigestGenerateData>(generated).result.snapshot.id;
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/publish", {
+        snapshotId
+      }),
+      context()
+    );
+
+    expect(response.status).toBe(200);
+    const data = responseData<CoachDigestPublishData>(response);
+    expect(data.result).toEqual({
+      snapshotId,
+      status: "blocked",
+      reason: "Coach digest publisher is not configured."
+    });
+    expect(readCoachDigestSnapshot(snapshotId)).toMatchObject({
+      publishedAt: null,
+      publishResultJson: null
+    });
+  });
+
+  test("POST /api/health/coach-digest/publish live publish records metadata only after the injected publisher succeeds", async () => {
+    const generated = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        offline: true
+      }),
+      context({ now: () => new Date("2026-06-15T12:34:56.000Z") })
+    );
+    const snapshotId = responseData<CoachDigestGenerateData>(generated).result.snapshot.id;
+    const publishedActions: unknown[] = [];
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/publish", {
+        snapshotId
+      }),
+      context({
+        now: () => new Date("2026-06-15T13:00:00.000Z"),
+        coachDigestPublisher: async (action: unknown) => {
+          publishedActions.push(action);
+          return { id: "board-comment-1", url: "https://board.example/comment/1" };
+        }
+      } as Partial<ApiHandlerContext>)
+    );
+
+    expect(response.status).toBe(200);
+    const data = responseData<CoachDigestPublishData>(response);
+    expect(data.result).toMatchObject({
+      snapshotId,
+      status: "published",
+      publishedAt: "2026-06-15T13:00:00.000Z",
+      publishResult: { id: "board-comment-1", url: "https://board.example/comment/1" }
+    });
+    expect(publishedActions).toHaveLength(1);
+    expect(readCoachDigestSnapshot(snapshotId)).toMatchObject({
+      publishedAt: "2026-06-15T13:00:00.000Z",
+      publishResultJson: JSON.stringify({ id: "board-comment-1", url: "https://board.example/comment/1" })
+    });
+  });
+
+  test("POST /api/health/coach-digest/publish adapts boardClient publish calls to the same board-facing action shape as dry-run", async () => {
+    const generated = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        offline: true
+      }),
+      context()
+    );
+    const snapshotId = responseData<CoachDigestGenerateData>(generated).result.snapshot.id;
+    const publishedActions: unknown[] = [];
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/publish", {
+        snapshotId
+      }),
+      context({
+        boardClient: {
+          async publish(action) {
+            publishedActions.push(action);
+            return { action, id: "board-comment-1" };
+          }
+        }
+      } as Partial<ApiHandlerContext>)
+    );
+
+    expect(response.status).toBe(200);
+    expect(responseData<CoachDigestPublishData>(response).result.status).toBe("published");
+    expect(publishedActions).toEqual([
+      {
+        target: "multica",
+        type: "add_comment",
+        title: "Coach health digest for 2026-06-15",
+        body: expect.stringContaining("# Coach daily health digest"),
+        checklist: [],
+        sourceEndpoints: ["POST /api/health/coach-digest/publish"]
+      }
+    ]);
+  });
+
+  test("POST /api/health/coach-digest/publish publisher failure returns blocked without marking the snapshot published", async () => {
+    const generated = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        offline: true
+      }),
+      context()
+    );
+    const snapshotId = responseData<CoachDigestGenerateData>(generated).result.snapshot.id;
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/publish", {
+        snapshotId
+      }),
+      context({
+        coachDigestPublisher: async () => {
+          throw new Error(
+            "board unavailable: Authorization: Bearer sk-secret; url https://user:pass@board.example/api?token=abc; path C:\\Users\\Holly\\secret.txt; unc \\\\server\\share\\secret.txt; extended \\\\?\\C:\\Users\\Holly\\extended-secret.txt"
+          );
+        }
+      } as Partial<ApiHandlerContext>)
+    );
+
+    expect(response.status).toBe(200);
+    const data = responseData<CoachDigestPublishData>(response);
+    expect(data.result).toEqual({
+      snapshotId,
+      status: "blocked",
+      reason: expect.stringContaining("board unavailable")
+    });
+    expect(data.result.reason).not.toContain("sk-secret");
+    expect(data.result.reason).not.toContain("user:pass");
+    expect(data.result.reason).not.toContain("token=abc");
+    expect(data.result.reason).not.toContain("C:\\Users\\Holly\\secret.txt");
+    expect(data.result.reason).not.toContain("\\\\server\\share\\secret.txt");
+    expect(data.result.reason).not.toContain("\\\\?\\C:\\Users\\Holly\\extended-secret.txt");
+    expect(data.result.reason).not.toContain("\\\\server\\share");
+    expect(data.result.reason).not.toContain("\\\\?\\");
+    expect(data.result.reason).toContain("REDACTED");
+    expect(data.result.reason).toContain("PATH_REDACTED");
+    expect(readCoachDigestSnapshot(snapshotId)).toMatchObject({
+      publishedAt: null,
+      publishResultJson: null
+    });
+  });
+
+  test.each([
+    ["missing snapshot id", {}],
+    ["zero snapshot id", { snapshotId: 0 }],
+    ["non-integer snapshot id", { snapshotId: 1.5 }],
+    ["unknown snapshot id", { snapshotId: 999 }]
+  ])("POST /api/health/coach-digest/publish rejects %s with a 400", async (_name, body) => {
+    const response = await handleApiRequest(authRequest("POST", "/api/health/coach-digest/publish", body), context());
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "health.coach-digest.publish" }
+    });
+  });
+
   test("POST /api/health/metrics creates a manual metric with deterministic handler time", async () => {
     const response = await handleApiRequest(
       authRequest("POST", "/api/health/metrics", {
@@ -1683,6 +1894,22 @@ describe("pure API request handlers", () => {
     return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
   }
 
+  function readCoachDigestSnapshot(snapshotId: number): {
+    publishedAt: string | null;
+    publishResultJson: string | null;
+  } {
+    return db
+      .prepare(
+        `SELECT published_at AS publishedAt, publish_result_json AS publishResultJson
+         FROM coach_digest_snapshots
+         WHERE id = ?`
+      )
+      .get(snapshotId) as {
+      publishedAt: string | null;
+      publishResultJson: string | null;
+    };
+  }
+
   function failTraceEventInserts(): void {
     db.exec(`
       CREATE TRIGGER fail_trace_event_inserts
@@ -2088,5 +2315,23 @@ interface CoachDigestGenerateData extends Record<string, unknown> {
       timestamp: string;
       dataJson: string;
     }>;
+  };
+}
+
+interface CoachDigestPublishData extends Record<string, unknown> {
+  result: {
+    snapshotId: number;
+    status: "dry_run" | "published" | "blocked";
+    intendedAction?: {
+      target: string;
+      type: string;
+      title: string;
+      body: string;
+      checklist: string[];
+      sourceEndpoints: string[];
+    };
+    publishedAt?: string;
+    publishResult?: unknown;
+    reason?: string;
   };
 }

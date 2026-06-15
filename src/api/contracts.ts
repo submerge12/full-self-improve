@@ -44,7 +44,8 @@ export const API_ROUTE_IDS = [
   "health.sedentary.spans.ingest",
   "health.sedentary.summary",
   "health.break-reminders.evaluate",
-  "health.coach-digest.generate"
+  "health.coach-digest.generate",
+  "health.coach-digest.publish"
 ] as const;
 
 export type ApiRouteId = (typeof API_ROUTE_IDS)[number];
@@ -218,6 +219,13 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/health/coach-digest/generate",
     auth: "bearer",
     description: "Generate a dry-run coach digest snapshot from health extension data and optional compass context."
+  },
+  {
+    id: "health.coach-digest.publish",
+    method: "POST",
+    path: "/api/health/coach-digest/publish",
+    auth: "bearer",
+    description: "Publish an existing coach digest snapshot to the configured board, or preview the publish action."
   }
 ] as const satisfies readonly ApiRouteManifestEntry[];
 

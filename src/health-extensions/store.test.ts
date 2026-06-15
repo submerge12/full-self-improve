@@ -12,6 +12,7 @@ import {
 import {
   findExerciseTemplateBySlug,
   findExerciseSessionByPlanAndTemplateKey,
+  getCoachDigestSnapshotById,
   findMetricImportByHash,
   getHealthMetricById,
   insertBreakReminder,
@@ -33,6 +34,7 @@ import {
   listEligibleBreakRemindersNear,
   listHealthMetrics,
   listSedentarySpansForWindow,
+  markCoachDigestSnapshotPublished,
   updateExerciseSessionCompletion
 } from "./store.js";
 
@@ -561,6 +563,47 @@ describe("health extension store", () => {
 
       expect(JSON.parse(digest.metricsSummaryJson)).toEqual({ sleep: 7.5 });
       expect(JSON.parse(trace.dataJson)).toEqual({ digestId: digest.id });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("finds coach digest snapshots by id and marks publish metadata", () => {
+    const db = migratedDb();
+
+    try {
+      const digest = insertCoachDigestSnapshot(db, {
+        date: "2026-06-14",
+        metricsSummary: { sleep: 7.5 },
+        exerciseSummary: { sessions: 1 },
+        sedentarySummary: { idleMinutes: 60 },
+        compassContext: { mood: "steady" },
+        renderedMarkdown: "# Digest",
+        sourceHash: "sha256:digest"
+      });
+
+      expect(getCoachDigestSnapshotById(db, digest.id)).toMatchObject({
+        id: digest.id,
+        date: "2026-06-14",
+        sourceHash: "sha256:digest"
+      });
+      expect(getCoachDigestSnapshotById(db, digest.id + 1)).toBeUndefined();
+
+      const published = markCoachDigestSnapshotPublished(db, digest.id, {
+        publishedAt: "2026-06-14T09:05:00.000Z",
+        publishResult: { boardItemId: "coach-2026-06-14", url: "https://board.example.test/items/1" }
+      });
+
+      expect(published.publishedAt).toBe("2026-06-14T09:05:00.000Z");
+      expect(JSON.parse(published.publishResultJson!)).toEqual({
+        boardItemId: "coach-2026-06-14",
+        url: "https://board.example.test/items/1"
+      });
+      expect(getCoachDigestSnapshotById(db, digest.id)).toMatchObject({
+        id: digest.id,
+        publishedAt: "2026-06-14T09:05:00.000Z",
+        publishResultJson: published.publishResultJson
+      });
     } finally {
       db.close();
     }

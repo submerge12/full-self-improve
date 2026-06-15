@@ -28,6 +28,7 @@ import {
 import { gradePersistentTeachback } from "../engine/persistent-teachback.js";
 import type { SourceAdapter } from "../engine/source-adapter.js";
 import type { TraceEvent } from "../engine/trace.js";
+import type { AgentBoardClient } from "../agents/executor.js";
 import {
   completeExerciseSession,
   createExercisePlanFromTemplate,
@@ -35,7 +36,14 @@ import {
   queryExerciseCompletion,
   type ExerciseTemplateDayInput
 } from "../health-extensions/exercise.js";
-import { generateCoachDigestSnapshot } from "../health-extensions/coach-digest.js";
+import {
+  generateCoachDigestSnapshot,
+  publishCoachDigestSnapshot,
+  type CoachDigestBoardPublish,
+  type CoachDigestPublishAction,
+  type CoachDigestPublishResult
+} from "../health-extensions/coach-digest.js";
+import type { AgentIntendedAction } from "../agents/dry-run.js";
 import {
   createHealthMetric,
   importHealthMetricsCsv,
@@ -71,6 +79,8 @@ export interface ApiHandlerContext {
   readonly expectedBearerToken?: string;
   readonly adapters?: Readonly<Record<string, SourceAdapter>>;
   readonly now?: Date | (() => Date);
+  readonly coachDigestPublisher?: CoachDigestBoardPublish;
+  readonly boardClient?: Pick<AgentBoardClient, "publish">;
 }
 
 export type ApiHandlerResponseBody = ApiSuccessBody | ApiErrorBody;
@@ -172,6 +182,29 @@ interface HealthCoachDigestGenerateBody {
   offline?: boolean;
   compassBaseUrl?: string;
 }
+
+interface HealthCoachDigestPublishBody {
+  snapshotId: number;
+  dryRun?: boolean;
+}
+
+type ApiCoachDigestPublishResult =
+  | {
+      readonly snapshotId: number;
+      readonly status: "dry_run";
+      readonly intendedAction: AgentIntendedAction;
+    }
+  | {
+      readonly snapshotId: number;
+      readonly status: "published";
+      readonly publishedAt: string;
+      readonly publishResult: unknown;
+    }
+  | {
+      readonly snapshotId: number;
+      readonly status: "blocked";
+      readonly reason: string;
+    };
 
 interface ExerciseTemplateCreateBody {
   slug: string;
@@ -289,6 +322,8 @@ export async function handleApiRequest(
         return handleBreakReminderEvaluate(request, context);
       case "health.coach-digest.generate":
         return await handleHealthCoachDigestGenerate(request, context);
+      case "health.coach-digest.publish":
+        return await handleHealthCoachDigestPublish(request, context);
     }
   } catch (error) {
     if (error instanceof ApiBadRequestError || isRouteInputError(route.id, error)) {
@@ -539,6 +574,21 @@ async function handleHealthCoachDigestGenerate(
   return successResponse("health.coach-digest.generate", { result });
 }
 
+async function handleHealthCoachDigestPublish(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): Promise<ApiResponse<ApiHandlerResponseBody>> {
+  const body = parseHealthCoachDigestPublishBody(request.body);
+  const result = await publishCoachDigestSnapshot(context.db, {
+    snapshotId: body.snapshotId,
+    dryRun: body.dryRun ?? false,
+    now: nowDate(context).toISOString(),
+    ...(body.dryRun === true ? {} : { publish: coachDigestPublishFunction(context) ?? missingCoachDigestPublisher })
+  });
+
+  return successResponse("health.coach-digest.publish", { result: apiCoachDigestPublishResult(result) });
+}
+
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
   db: Database.Database,
   mutation: () => T
@@ -703,6 +753,16 @@ function parseHealthCoachDigestGenerateBody(body: unknown): HealthCoachDigestGen
     date,
     ...(offline === undefined ? {} : { offline }),
     ...(compassBaseUrl === undefined ? {} : { compassBaseUrl })
+  };
+}
+
+function parseHealthCoachDigestPublishBody(body: unknown): HealthCoachDigestPublishBody {
+  const record = parseBodyRecord(body);
+  const dryRun = optionalBoolean(record.dryRun, "dryRun");
+
+  return {
+    snapshotId: requiredPositiveInteger(record, "snapshotId"),
+    ...(dryRun === undefined ? {} : { dryRun })
   };
 }
 
@@ -1360,6 +1420,95 @@ function stableSedentarySpan(span: StoredSedentarySpan): SedentarySpanResponse {
   };
 }
 
+function coachDigestPublishFunction(context: ApiHandlerContext): CoachDigestBoardPublish | undefined {
+  if (context.coachDigestPublisher !== undefined) {
+    return context.coachDigestPublisher;
+  }
+
+  if (context.boardClient === undefined) {
+    return undefined;
+  }
+  const boardClient = context.boardClient;
+
+  return (action) => boardClient.publish(coachDigestBoardAction(action));
+}
+
+function coachDigestBoardAction(action: CoachDigestPublishAction): AgentIntendedAction {
+  return {
+    target: "multica",
+    type: "add_comment",
+    title: `Coach health digest for ${action.date}`,
+    body: action.renderedMarkdown,
+    checklist: [],
+    sourceEndpoints: ["POST /api/health/coach-digest/publish"]
+  };
+}
+
+function missingCoachDigestPublisher(): never {
+  throw new Error("Coach digest publisher is not configured.");
+}
+
+function apiCoachDigestPublishResult(result: CoachDigestPublishResult): ApiCoachDigestPublishResult {
+  if (result.status === "dry_run") {
+    return {
+      snapshotId: result.snapshotId,
+      status: "dry_run",
+      intendedAction: coachDigestBoardAction(result.intendedAction)
+    };
+  }
+
+  if (result.status === "blocked") {
+    return {
+      snapshotId: result.snapshotId,
+      status: "blocked",
+      reason: redactApiBoundaryMessage(result.reason)
+    };
+  }
+
+  return result;
+}
+
+function redactApiBoundaryMessage(message: string): string {
+  return message
+    .replace(
+      /\b(authorization\s*[:=]\s*)(bearer\s+)?[^\s;,]+/giu,
+      (_match, prefix: string, bearer: string | undefined) => `${prefix}${bearer ?? ""}REDACTED`
+    )
+    .replace(/\b(cookie\s*[:=]\s*)[^\r\n]*/giu, "$1REDACTED")
+    .replace(
+      /\b((?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|auth|session|sid|password)\s*[:=]\s*)[^\s;,)&]+/giu,
+      "$1REDACTED"
+    )
+    .replace(/(https?:\/\/)[^\s/@]+@[^\s;,)]*/giu, (url) => redactUrlCredentialsAndSensitiveQuery(url))
+    .replace(
+      /([?&][^=\s&]*(?:token|key|secret|authorization|auth|cookie|session|sid|password)[^=\s&]*=)[^\s&;,)]*/giu,
+      "$1REDACTED"
+    )
+    .replace(/\\\\(?:\?\\[A-Z]:[\\/][^\s;,)]*|[^\\/\s;,)]+[\\/][^\s;,)]*)/giu, "PATH_REDACTED")
+    .replace(/\b[A-Z]:[\\/][^\s;,)]*/giu, "PATH_REDACTED")
+    .replace(/\bfile:\/\/\/?[^\s;,)]*/giu, "PATH_REDACTED");
+}
+
+function redactUrlCredentialsAndSensitiveQuery(value: string): string {
+  try {
+    const url = new URL(value);
+    if (url.username.length > 0) {
+      url.username = "REDACTED";
+    }
+    if (url.password.length > 0) {
+      url.password = "";
+    }
+    for (const key of Array.from(url.searchParams.keys())) {
+      if (/(?:token|key|secret|authorization|auth|cookie|session|sid|password)/iu.test(key)) {
+        url.searchParams.set(key, "REDACTED");
+      }
+    }
+    return url.toString();
+  } catch {
+    return "URL_REDACTED";
+  }
+}
+
 function successResponse(routeId: ApiRouteId, data: Record<string, unknown>): ApiResponse<ApiHandlerResponseBody> {
   return {
     status: 200,
@@ -1427,6 +1576,7 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
     case "health.break-reminders.evaluate":
       return isSedentaryInputError(error.message);
     case "health.coach-digest.generate":
+    case "health.coach-digest.publish":
       return isHealthCoachDigestInputError(error.message);
     default:
       return false;
@@ -1538,7 +1688,11 @@ function isSedentaryInputError(message: string): boolean {
 }
 
 function isHealthCoachDigestInputError(message: string): boolean {
-  return message === "date must be an ISO date" || message === "now must be an ISO instant";
+  return (
+    message === "date must be an ISO date" ||
+    message === "now must be an ISO instant" ||
+    message === "coach digest snapshot not found"
+  );
 }
 
 function isConceptNotFoundMessage(message: string): boolean {

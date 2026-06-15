@@ -335,6 +335,117 @@ describe("agent executor", () => {
     expect(publishedActions[0]?.body).toContain("Source: GET http://127.0.0.1:3000/api/mastery/summary");
   });
 
+  test("live daily Coach digest renders generated health markdown into the board comment", async () => {
+    const plan = createAgentDryRunPlan({
+      role: "coach",
+      phase: "daily-health",
+      date: "2026-06-13"
+    });
+    const publishedActions: AgentIntendedAction[] = [];
+
+    const result = await executeAgentPlan(plan, "live", {
+      readClient: {
+        async read(endpoint) {
+          return {
+            endpoint,
+            status: 200,
+            body: coachDigestSuccessBody("# Coach daily health digest\n\n- Sleep: 7h\n- Steps: 8,500")
+          };
+        }
+      },
+      boardClient: {
+        async publish(action) {
+          publishedActions.push(action);
+          return { action, id: "coach-digest-comment" };
+        }
+      }
+    });
+
+    expect(result.status).toBe("completed");
+    expect(publishedActions).toHaveLength(1);
+    expect(publishedActions[0]?.title).toBe("Coach health digest for 2026-06-13");
+    expect(publishedActions[0]?.body).toContain("Date: 2026-06-13");
+    expect(publishedActions[0]?.body).toContain("Source: POST http://127.0.0.1:3000/api/health/coach-digest/generate");
+    expect(publishedActions[0]?.body).toContain("- Sleep: 7h");
+    expect(publishedActions[0]?.body).not.toContain("Dry-run target board");
+    expect(result.publishedActions[0]?.action.body).toBe(publishedActions[0]?.body);
+  });
+
+  test("live daily Coach digest publishes a blocker when the generated digest body is malformed", async () => {
+    const plan = createAgentDryRunPlan({
+      role: "coach",
+      phase: "daily-health",
+      date: "2026-06-13"
+    });
+    const publishedActions: AgentIntendedAction[] = [];
+
+    const result = await executeAgentPlan(plan, "live", {
+      readClient: {
+        async read(endpoint) {
+          return { endpoint, status: 200, body: { ok: true, routeId: "plan.today", data: {} } };
+        }
+      },
+      boardClient: {
+        async publish(action) {
+          publishedActions.push(action);
+          return { action, id: "blocker-comment" };
+        }
+      }
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.reads).toHaveLength(1);
+    expect(result.publishedActions).toHaveLength(1);
+    expect(result.blocker?.title).toBe("Agent blocked for 2026-06-13");
+    expect(result.blocker?.body).toContain("health.coach-digest.generate success body");
+    expect(result.blocker?.sourceEndpoints).toEqual(["POST http://127.0.0.1:3000/api/health/coach-digest/generate"]);
+    expect(publishedActions.map((action) => action.title)).toEqual(["Agent blocked for 2026-06-13"]);
+  });
+
+  test("live daily Coach digest publishes a blocker when no digest generate read is recognized", async () => {
+    const plan = {
+      ...createAgentDryRunPlan({
+        role: "coach",
+        phase: "daily-health",
+        date: "2026-06-13"
+      }),
+      externalReads: [
+        {
+          method: "POST",
+          url: "http://127.0.0.1:3000/api/health/coach-digest/generate-preview",
+          purpose: "A similar endpoint that must not be treated as the Coach digest generator."
+        }
+      ]
+    } as const;
+    const publishedActions: AgentIntendedAction[] = [];
+
+    const result = await executeAgentPlan(plan, "live", {
+      readClient: {
+        async read(endpoint) {
+          return { endpoint, status: 200, body: coachDigestSuccessBody("# Preview digest") };
+        }
+      },
+      boardClient: {
+        async publish(action) {
+          publishedActions.push(action);
+          return { action, id: "blocker-comment" };
+        }
+      }
+    });
+
+    expect(result.status).toBe("blocked");
+    expect(result.reads).toHaveLength(1);
+    expect(result.publishedActions).toHaveLength(1);
+    expect(result.blocker?.title).toBe("Agent blocked for 2026-06-13");
+    expect(result.blocker?.body).toContain("No Coach digest generate read was available.");
+    expect(result.blocker?.sourceEndpoints).toEqual([
+      "POST http://127.0.0.1:3000/api/health/coach-digest/generate-preview"
+    ]);
+    expect(publishedActions).toHaveLength(1);
+    expect(publishedActions[0]?.title).toBe("Agent blocked for 2026-06-13");
+    expect(publishedActions[0]?.body).not.toContain("Dry-run target board");
+  });
+
   test("live execution requires injected clients", async () => {
     const plan = createAgentDryRunPlan({ role: "nutritionist", date: "2026-06-13" });
 
@@ -350,3 +461,15 @@ describe("agent executor", () => {
     ).rejects.toThrow(/requires boardClient/);
   });
 });
+
+function coachDigestSuccessBody(renderedMarkdown: string): Record<string, unknown> {
+  return {
+    ok: true,
+    routeId: "health.coach-digest.generate",
+    data: {
+      result: {
+        renderedMarkdown
+      }
+    }
+  };
+}

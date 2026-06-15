@@ -18,6 +18,7 @@ import {
   createAgentDryRunPlan,
   type AgentDayDryRunPlan,
   type AgentEndpointPlan,
+  type AgentIntendedAction,
   parseAgentPhase,
   parseAgentRole,
   type AgentDryRunPlan
@@ -130,6 +131,8 @@ import {
 } from "../health-extensions/sedentary.js";
 import {
   generateCoachDigestSnapshot,
+  publishCoachDigestSnapshot,
+  type CoachDigestPublishAction,
   type CoachDigestSnapshotResult
 } from "../health-extensions/coach-digest.js";
 import {
@@ -285,11 +288,28 @@ export interface KlHealthBreakReminderCommandResult {
   readonly result: BreakReminderEvaluationResult;
 }
 
-export interface KlHealthCoachDigestCommandResult {
+export interface KlHealthCoachDigestGenerateCommandResult {
   readonly command: "health-coach-digest";
   readonly mode: "dry-run";
   readonly result: CoachDigestSnapshotResult;
 }
+
+export interface CoachDigestPublishDryRunResult {
+  readonly snapshotId: number;
+  readonly status: "dry_run";
+  readonly intendedAction: AgentIntendedAction;
+}
+
+export interface KlHealthCoachDigestPublishCommandResult {
+  readonly command: "health-coach-digest";
+  readonly mode: "dry-run";
+  readonly action: "publish";
+  readonly result: CoachDigestPublishDryRunResult;
+}
+
+export type KlHealthCoachDigestCommandResult =
+  | KlHealthCoachDigestGenerateCommandResult
+  | KlHealthCoachDigestPublishCommandResult;
 
 export type KlHealthWindowsLoggerCommandResult =
   | {
@@ -1363,6 +1383,11 @@ async function runHealthCoachDigestCommand(
   args: readonly string[],
   io: KlHandlerIO
 ): Promise<KlHealthCoachDigestCommandResult> {
+  const [action, ...actionArgs] = args;
+  if (action === "publish") {
+    return runHealthCoachDigestPublishCommand(actionArgs);
+  }
+
   const { options, offline } = parseHealthCoachDigestOptions(args);
   const dbPath = requireOne(options, "--db", "health-coach-digest");
   const date = parseCliIsoDate(requireOne(options, "--date", "health-coach-digest"), "--date");
@@ -1399,6 +1424,52 @@ async function runHealthCoachDigestCommand(
   } finally {
     db.close();
   }
+}
+
+async function runHealthCoachDigestPublishCommand(
+  args: readonly string[]
+): Promise<KlHealthCoachDigestPublishCommandResult> {
+  const options = parseHealthCoachDigestPublishOptions(args);
+  const dbPath = requireOne(options, "--db", "health-coach-digest publish");
+  const snapshotId = parsePositiveSafeInteger(
+    requireOne(options, "--snapshot-id", "health-coach-digest publish"),
+    "--snapshot-id"
+  );
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+  try {
+    const result = await publishCoachDigestSnapshot(db, {
+      snapshotId,
+      dryRun: true
+    });
+    if (result.status !== "dry_run") {
+      throw new Error("Health coach digest publish dry-run returned a non-dry-run result.");
+    }
+
+    return {
+      command: "health-coach-digest",
+      mode: "dry-run",
+      action: "publish",
+      result: {
+        snapshotId: result.snapshotId,
+        status: "dry_run",
+        intendedAction: coachDigestPublishBoardAction(result.intendedAction)
+      }
+    };
+  } finally {
+    db.close();
+  }
+}
+
+function coachDigestPublishBoardAction(action: CoachDigestPublishAction): AgentIntendedAction {
+  return {
+    target: "multica",
+    type: "add_comment",
+    title: `Coach health digest for ${action.date}`,
+    body: action.renderedMarkdown,
+    checklist: [],
+    sourceEndpoints: ["POST /api/health/coach-digest/publish"]
+  };
 }
 
 function runHealthWindowsLoggerCommand(args: readonly string[]): KlHealthWindowsLoggerCommandResult {
@@ -2249,6 +2320,52 @@ function parseHealthCoachDigestOptions(args: readonly string[]): {
   }
 
   return { offline: offlineCount === 1, options };
+}
+
+function parseHealthCoachDigestPublishOptions(args: readonly string[]): Map<string, string[]> {
+  const allowed = new Set(["--db", "--snapshot-id"]);
+  const options = new Map<string, string[]>();
+  let dryRunCount = 0;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index];
+    const value = args[index + 1];
+
+    if (name === "--dry-run") {
+      dryRunCount += 1;
+      continue;
+    }
+
+    if (name === "--live") {
+      throw new UsageError("Command health-coach-digest publish does not support --live.");
+    }
+
+    if (name === undefined || !name.startsWith("--")) {
+      throw new UsageError(`Unexpected positional argument for health-coach-digest publish: ${name ?? ""}`);
+    }
+
+    if (!allowed.has(name)) {
+      throw new UsageError(`Unknown option for health-coach-digest publish: ${name}`);
+    }
+
+    if (value === undefined || value.startsWith("--")) {
+      throw new UsageError(`Option ${name} for health-coach-digest publish requires a value.`);
+    }
+
+    const values = options.get(name) ?? [];
+    values.push(value);
+    options.set(name, values);
+    index += 1;
+  }
+
+  if (dryRunCount === 0) {
+    throw new UsageError("Command health-coach-digest publish requires --dry-run.");
+  }
+  if (dryRunCount !== 1) {
+    throw new UsageError("Command health-coach-digest publish requires exactly one --dry-run flag.");
+  }
+
+  return options;
 }
 
 function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {

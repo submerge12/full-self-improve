@@ -93,7 +93,27 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
 }
 
 function successfulApiBodyForUrl(url: string): Record<string, unknown> {
-  if (new URL(url).pathname === "/api/mastery/summary") {
+  const parsed = new URL(url);
+  if (parsed.pathname === "/api/health/coach-digest/generate") {
+    return {
+      ok: true,
+      routeId: "health.coach-digest.generate",
+      data: {
+        result: {
+          renderedMarkdown: [
+            "# Coach daily health digest",
+            "## Date",
+            parsed.searchParams.get("date") ?? "2026-06-13",
+            "",
+            "## Metrics",
+            "- No metrics recorded for this date."
+          ].join("\n")
+        }
+      }
+    };
+  }
+
+  if (parsed.pathname === "/api/mastery/summary") {
     return {
       ok: true,
       routeId: "mastery.summary",
@@ -306,6 +326,24 @@ interface HealthCoachDigestCliCommandResult {
   };
 }
 
+interface HealthCoachDigestPublishCliCommandResult {
+  command: "health-coach-digest";
+  mode: "dry-run";
+  action: "publish";
+  result: {
+    snapshotId: number;
+    status: "dry_run";
+    intendedAction: {
+      target: "multica";
+      type: "add_comment";
+      title: string;
+      body: string;
+      checklist: readonly string[];
+      sourceEndpoints: readonly string[];
+    };
+  };
+}
+
 const DOMAIN_COUNTABLE_TABLES = [
   "schema_migrations",
   "sources",
@@ -336,6 +374,27 @@ function countHealthRows(dbPath: string, table: HealthCountableTable): number {
   try {
     const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
     return row.count;
+  } finally {
+    db.close();
+  }
+}
+
+function readCoachDigestSnapshotPublishState(dbPath: string, snapshotId: number): {
+  publishedAt: string | null;
+  publishResultJson: string | null;
+} {
+  const db = new Database(dbPath, { readonly: true });
+  try {
+    return db
+      .prepare(
+        `SELECT published_at AS publishedAt, publish_result_json AS publishResultJson
+         FROM coach_digest_snapshots
+         WHERE id = ?`
+      )
+      .get(snapshotId) as {
+      publishedAt: string | null;
+      publishResultJson: string | null;
+    };
   } finally {
     db.close();
   }
@@ -903,6 +962,87 @@ describe("kl CLI handler", () => {
     ]);
     expect(fetchCalls[0]?.init).toEqual({ method: "GET" });
     expect(authorizationHeader(fetchCalls[0])).toBeUndefined();
+  });
+
+  test("health-coach-digest publish dry-run returns intended publish action without live board writes", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-coach-digest-publish-")), "digest.db");
+    const generated = (await handleKlCommand([
+      "health-coach-digest",
+      "--db",
+      dbPath,
+      "--date",
+      "2026-06-15",
+      "--dry-run",
+      "--offline",
+      "--now",
+      "2026-06-15T12:34:56.000Z"
+    ])) as unknown as HealthCoachDigestCliCommandResult;
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(
+      [
+        "health-coach-digest",
+        "publish",
+        "--db",
+        dbPath,
+        "--snapshot-id",
+        String(generated.result.snapshot.id),
+        "--dry-run"
+      ],
+      { stdout: stdout.sink }
+    )) as unknown as HealthCoachDigestPublishCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-coach-digest",
+      mode: "dry-run",
+      action: "publish",
+      result: {
+        snapshotId: generated.result.snapshot.id,
+        status: "dry_run",
+        intendedAction: {
+          target: "multica",
+          type: "add_comment",
+          title: "Coach health digest for 2026-06-15",
+          body: expect.stringContaining("# Coach daily health digest"),
+          checklist: [],
+          sourceEndpoints: ["POST /api/health/coach-digest/publish"]
+        }
+      }
+    });
+    expect(result.result.intendedAction).not.toHaveProperty("sourceHash");
+    expect(result.result.intendedAction).not.toHaveProperty("renderedMarkdown");
+    expect(readCoachDigestSnapshotPublishState(dbPath, generated.result.snapshot.id)).toEqual({
+      publishedAt: null,
+      publishResultJson: null
+    });
+  });
+
+  test("health-coach-digest publish rejects live mode and invalid snapshot ids before live publishing", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-coach-digest-publish-invalid-")), "digest.db");
+
+    await handleKlCommand([
+      "health-coach-digest",
+      "--db",
+      dbPath,
+      "--date",
+      "2026-06-15",
+      "--dry-run",
+      "--offline"
+    ]);
+
+    await expect(
+      handleKlCommand(["health-coach-digest", "publish", "--db", dbPath, "--snapshot-id", "1", "--live"])
+    ).rejects.toThrow(/does not support --live/);
+    await expect(
+      handleKlCommand(["health-coach-digest", "publish", "--db", dbPath, "--snapshot-id", "0", "--dry-run"])
+    ).rejects.toThrow(/Invalid --snapshot-id value "0"/);
+    await expect(
+      handleKlCommand(["health-coach-digest", "publish", "--db", dbPath, "--snapshot-id", "1"])
+    ).rejects.toThrow(/requires --dry-run/);
+    await expect(
+      handleKlCommand(["health-coach-digest", "publish", "--db", dbPath, "--snapshot-id", "1", "--dry-run", "--dry-run"])
+    ).rejects.toThrow(/requires exactly one --dry-run flag/);
   });
 
   test("health-coach-digest rejects missing duplicate unknown and live-publish options before creating a database", async () => {
@@ -3396,7 +3536,7 @@ describe("kl CLI handler", () => {
         totals: {
           reads: 5,
           publishedActions: 5,
-          blockers: 1,
+          blockers: 2,
           publishFailures: 0
         },
         nonCompletionNotice:
@@ -3407,7 +3547,7 @@ describe("kl CLI handler", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:blocked",
       "nutritionist:daily-meals:completed",
-      "coach:daily-health:completed",
+      "coach:daily-health:blocked",
       "scholar:evening-mastery:completed"
     ]);
     expect(result.result.blockerTitle).toBe("Agent blocked for 2026-06-13");
@@ -3442,7 +3582,7 @@ describe("kl CLI handler", () => {
       "librarian:nightly-ingest:completed",
       "scholar:morning-plan:completed",
       "nutritionist:daily-meals:blocked",
-      "coach:daily-health:completed",
+      "coach:daily-health:blocked",
       "scholar:evening-mastery:completed"
     ]);
   });

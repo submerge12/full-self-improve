@@ -417,6 +417,18 @@ describe("agent day runner", () => {
 });
 
 function successfulReadBodyFor(endpoint: AgentEndpointPlan): Record<string, unknown> {
+  if (new URL(endpoint.url).pathname === "/api/health/coach-digest/generate") {
+    return {
+      ok: true,
+      routeId: "health.coach-digest.generate",
+      data: {
+        result: {
+          renderedMarkdown: "# Coach daily health digest\n\n- Availability: available"
+        }
+      }
+    };
+  }
+
   if (new URL(endpoint.url).pathname === "/api/mastery/summary") {
     return {
       ok: true,

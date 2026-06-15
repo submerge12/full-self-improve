@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import { applyMigrations } from "../db/migrations.js";
 import { completeExerciseSession, createExercisePlanFromTemplate, createExerciseTemplate } from "./exercise.js";
 import { createHealthMetric } from "./metrics.js";
-import { generateCoachDigestSnapshot } from "./coach-digest.js";
+import { generateCoachDigestSnapshot, publishCoachDigestSnapshot } from "./coach-digest.js";
 import { ingestSedentarySpan } from "./sedentary.js";
 
 describe("coach digest domain", () => {
@@ -248,6 +248,173 @@ describe("coach digest domain", () => {
     }
   });
 
+  test("previews publishing an existing snapshot without updating storage", async () => {
+    const db = migratedDb();
+
+    try {
+      seedDailyHealthContext(db);
+      const generated = await generateCoachDigestSnapshot(db, {
+        date: "2026-06-15",
+        now: "2026-06-15T21:00:00.000Z",
+        offline: true
+      });
+
+      const result = await publishCoachDigestSnapshot(db, {
+        snapshotId: generated.snapshot.id,
+        dryRun: true,
+        now: "2026-06-15T21:10:00.000Z"
+      });
+
+      expect(result).toEqual({
+        snapshotId: generated.snapshot.id,
+        status: "dry_run",
+        intendedAction: {
+          type: "publish_coach_digest_snapshot",
+          date: "2026-06-15",
+          sourceHash: generated.sourceHash,
+          renderedMarkdown: generated.renderedMarkdown
+        }
+      });
+      expect(readCoachDigestPublishedAt(db, generated.snapshot.id)).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("marks an existing snapshot published only after injected publish succeeds", async () => {
+    const db = migratedDb();
+    const publishCalls: unknown[] = [];
+
+    try {
+      seedDailyHealthContext(db);
+      const generated = await generateCoachDigestSnapshot(db, {
+        date: "2026-06-15",
+        now: "2026-06-15T21:00:00.000Z",
+        offline: true
+      });
+
+      const result = await publishCoachDigestSnapshot(db, {
+        snapshotId: generated.snapshot.id,
+        dryRun: false,
+        now: "2026-06-15T21:10:00.000Z",
+        publish: async (action) => {
+          publishCalls.push(action);
+          return { boardItemId: "coach-2026-06-15", url: "https://board.example.test/items/1" };
+        }
+      });
+
+      expect(publishCalls).toEqual([
+        {
+          type: "publish_coach_digest_snapshot",
+          date: "2026-06-15",
+          sourceHash: generated.sourceHash,
+          renderedMarkdown: generated.renderedMarkdown
+        }
+      ]);
+      expect(result).toEqual({
+        snapshotId: generated.snapshot.id,
+        status: "published",
+        publishedAt: "2026-06-15T21:10:00.000Z",
+        publishResult: { boardItemId: "coach-2026-06-15", url: "https://board.example.test/items/1" }
+      });
+      expect(readCoachDigestPublishedAt(db, generated.snapshot.id)).toBe("2026-06-15T21:10:00.000Z");
+      expect(readCoachDigestPublishResult(db, generated.snapshot.id)).toEqual({
+        boardItemId: "coach-2026-06-15",
+        url: "https://board.example.test/items/1"
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("reuses stored publish metadata for repeat live publish without calling publisher", async () => {
+    const db = migratedDb();
+    let repeatPublishCalls = 0;
+
+    try {
+      seedDailyHealthContext(db);
+      const generated = await generateCoachDigestSnapshot(db, {
+        date: "2026-06-15",
+        now: "2026-06-15T21:00:00.000Z",
+        offline: true
+      });
+      const first = await publishCoachDigestSnapshot(db, {
+        snapshotId: generated.snapshot.id,
+        dryRun: false,
+        now: "2026-06-15T21:10:00.000Z",
+        publish: async () => ({ boardItemId: "coach-2026-06-15", url: "https://board.example.test/items/1" })
+      });
+
+      const repeated = await publishCoachDigestSnapshot(db, {
+        snapshotId: generated.snapshot.id,
+        dryRun: false,
+        now: "2026-06-15T21:20:00.000Z",
+        publish: async () => {
+          repeatPublishCalls += 1;
+          return { boardItemId: "duplicate", url: "https://board.example.test/items/duplicate" };
+        }
+      });
+
+      expect(repeatPublishCalls).toBe(0);
+      expect(repeated).toEqual(first);
+      expect(readCoachDigestPublishedAt(db, generated.snapshot.id)).toBe("2026-06-15T21:10:00.000Z");
+      expect(readCoachDigestPublishResult(db, generated.snapshot.id)).toEqual({
+        boardItemId: "coach-2026-06-15",
+        url: "https://board.example.test/items/1"
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  test("leaves a snapshot unpublished when injected publish fails", async () => {
+    const db = migratedDb();
+
+    try {
+      seedDailyHealthContext(db);
+      const generated = await generateCoachDigestSnapshot(db, {
+        date: "2026-06-15",
+        now: "2026-06-15T21:00:00.000Z",
+        offline: true
+      });
+
+      const result = await publishCoachDigestSnapshot(db, {
+        snapshotId: generated.snapshot.id,
+        dryRun: false,
+        now: "2026-06-15T21:10:00.000Z",
+        publish: async () => {
+          throw new Error("board unavailable");
+        }
+      });
+
+      expect(result).toEqual({
+        snapshotId: generated.snapshot.id,
+        status: "blocked",
+        reason: "board unavailable"
+      });
+      expect(readCoachDigestPublishedAt(db, generated.snapshot.id)).toBeNull();
+      expect(readCoachDigestPublishResult(db, generated.snapshot.id)).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  test("rejects publish for a missing snapshot id as a domain input error", async () => {
+    const db = migratedDb();
+
+    try {
+      await expect(
+        publishCoachDigestSnapshot(db, {
+          snapshotId: 404,
+          dryRun: true,
+          now: "2026-06-15T21:10:00.000Z"
+        })
+      ).rejects.toThrow("coach digest snapshot not found");
+    } finally {
+      db.close();
+    }
+  });
+
   test("rejects invalid date and malformed Compass config before writing rows", async () => {
     const db = migratedDb();
     let called = false;
@@ -410,4 +577,16 @@ function coachTraceCount(db: Database.Database): number {
 function coachDigestSnapshotCount(db: Database.Database): number {
   const row = db.prepare("SELECT COUNT(*) AS count FROM coach_digest_snapshots").get() as { count: number };
   return row.count;
+}
+
+function readCoachDigestPublishedAt(db: Database.Database, snapshotId: number): string | null {
+  const row = db.prepare("SELECT published_at FROM coach_digest_snapshots WHERE id = ?").get(snapshotId) as { published_at: string | null };
+  return row.published_at;
+}
+
+function readCoachDigestPublishResult(db: Database.Database, snapshotId: number): unknown {
+  const row = db.prepare("SELECT publish_result_json FROM coach_digest_snapshots WHERE id = ?").get(snapshotId) as {
+    publish_result_json: string | null;
+  };
+  return row.publish_result_json === null ? null : JSON.parse(row.publish_result_json);
 }

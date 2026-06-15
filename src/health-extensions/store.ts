@@ -97,6 +97,11 @@ export interface BreakReminderWithStreak {
   readonly reminder: StoredBreakReminder;
 }
 
+export interface CoachDigestPublishMetadataInput {
+  readonly publishedAt: string;
+  readonly publishResult: unknown;
+}
+
 export function insertHealthMetric(
   db: Database.Database,
   input: HealthMetricInput,
@@ -819,6 +824,68 @@ export function findCoachDigestSnapshotByDateAndSourceHash(
     }) as CoachDigestSnapshotRow | undefined;
 
   return row === undefined ? undefined : mapCoachDigestSnapshotRow(row);
+}
+
+export function getCoachDigestSnapshotById(db: Database.Database, id: number): StoredCoachDigestSnapshot | undefined {
+  const row = db
+    .prepare(
+      `SELECT
+         id,
+         date,
+         metrics_summary_json,
+         exercise_summary_json,
+         sedentary_summary_json,
+         compass_context_json,
+         rendered_markdown,
+         source_hash,
+         published_at,
+         publish_result_json,
+         created_at,
+         updated_at
+       FROM coach_digest_snapshots
+       WHERE id = ?`
+    )
+    .get(assertPositiveInteger(id, "id")) as CoachDigestSnapshotRow | undefined;
+
+  return row === undefined ? undefined : mapCoachDigestSnapshotRow(row);
+}
+
+export function markCoachDigestSnapshotPublished(
+  db: Database.Database,
+  id: number,
+  input: CoachDigestPublishMetadataInput
+): StoredCoachDigestSnapshot {
+  const row = db
+    .prepare(
+      `UPDATE coach_digest_snapshots
+       SET published_at = @publishedAt,
+           publish_result_json = @publishResultJson,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = @id
+       RETURNING
+         id,
+         date,
+         metrics_summary_json,
+         exercise_summary_json,
+         sedentary_summary_json,
+         compass_context_json,
+         rendered_markdown,
+         source_hash,
+         published_at,
+         publish_result_json,
+         created_at,
+         updated_at`
+    )
+    .get({
+      id: assertPositiveInteger(id, "id"),
+      publishedAt: assertIsoInstant(input.publishedAt, "publishedAt"),
+      publishResultJson: stringifyJson(input.publishResult, "publishResult")
+    }) as CoachDigestSnapshotRow | undefined;
+
+  if (row === undefined) {
+    throw new Error("coach digest snapshot not found");
+  }
+  return mapCoachDigestSnapshotRow(row);
 }
 
 interface HealthMetricRow {

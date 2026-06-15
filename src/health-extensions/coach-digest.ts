@@ -6,7 +6,13 @@ import { queryExerciseCompletion, type ExerciseCompletionSummary } from "./exerc
 import { queryHealthMetrics } from "./metrics.js";
 import { assertIsoDate, assertIsoInstant, type StoredCoachDigestSnapshot, type StoredHealthMetric, type StoredHealthTraceEvent } from "./schema.js";
 import { computeSedentarySummary, type SedentarySummary } from "./sedentary.js";
-import { findCoachDigestSnapshotByDateAndSourceHash, insertCoachDigestSnapshot, insertHealthTraceEvent } from "./store.js";
+import {
+  findCoachDigestSnapshotByDateAndSourceHash,
+  getCoachDigestSnapshotById,
+  insertCoachDigestSnapshot,
+  insertHealthTraceEvent,
+  markCoachDigestSnapshotPublished
+} from "./store.js";
 
 export interface CoachDigestGenerateInput {
   readonly date: string;
@@ -22,6 +28,40 @@ export interface CoachDigestSnapshotResult {
   readonly sourceHash: string;
   readonly traceEvents: readonly StoredHealthTraceEvent[];
 }
+
+export interface CoachDigestPublishAction {
+  readonly type: "publish_coach_digest_snapshot";
+  readonly date: string;
+  readonly sourceHash: string;
+  readonly renderedMarkdown: string;
+}
+
+export type CoachDigestBoardPublish = (action: CoachDigestPublishAction) => Promise<unknown> | unknown;
+
+export interface CoachDigestPublishInput {
+  readonly snapshotId: number;
+  readonly dryRun: boolean;
+  readonly now?: string;
+  readonly publish?: CoachDigestBoardPublish;
+}
+
+export type CoachDigestPublishResult =
+  | {
+      readonly snapshotId: number;
+      readonly status: "dry_run";
+      readonly intendedAction: CoachDigestPublishAction;
+    }
+  | {
+      readonly snapshotId: number;
+      readonly status: "published";
+      readonly publishedAt: string;
+      readonly publishResult: unknown;
+    }
+  | {
+      readonly snapshotId: number;
+      readonly status: "blocked";
+      readonly reason: string;
+    };
 
 interface MetricsSummary {
   readonly from: string;
@@ -168,6 +208,68 @@ export async function generateCoachDigestSnapshot(
   });
 
   return transaction();
+}
+
+export async function publishCoachDigestSnapshot(
+  db: Database.Database,
+  input: CoachDigestPublishInput
+): Promise<CoachDigestPublishResult> {
+  const snapshot = getCoachDigestSnapshotById(db, input.snapshotId);
+  if (snapshot === undefined) {
+    throw new Error("coach digest snapshot not found");
+  }
+
+  const intendedAction: CoachDigestPublishAction = {
+    type: "publish_coach_digest_snapshot",
+    date: snapshot.date,
+    sourceHash: snapshot.sourceHash,
+    renderedMarkdown: snapshot.renderedMarkdown
+  };
+
+  if (input.dryRun) {
+    return {
+      snapshotId: snapshot.id,
+      status: "dry_run",
+      intendedAction
+    };
+  }
+
+  if (snapshot.publishedAt !== undefined && snapshot.publishResultJson !== undefined) {
+    return {
+      snapshotId: snapshot.id,
+      status: "published",
+      publishedAt: snapshot.publishedAt,
+      publishResult: JSON.parse(snapshot.publishResultJson) as unknown
+    };
+  }
+
+  if (input.publish === undefined) {
+    throw new Error("publish function is required for live coach digest publish");
+  }
+
+  const publishedAt = assertIsoInstant(input.now ?? new Date().toISOString(), "now");
+  let publishResult: unknown;
+  try {
+    publishResult = (await input.publish(intendedAction)) ?? null;
+  } catch (error) {
+    return {
+      snapshotId: snapshot.id,
+      status: "blocked",
+      reason: errorMessage(error)
+    };
+  }
+
+  markCoachDigestSnapshotPublished(db, snapshot.id, {
+    publishedAt,
+    publishResult
+  });
+
+  return {
+    snapshotId: snapshot.id,
+    status: "published",
+    publishedAt,
+    publishResult
+  };
 }
 
 function summarizeMetrics(metrics: readonly StoredHealthMetric[], from: string, to: string): MetricsSummary {
@@ -452,4 +554,8 @@ function addUtcDays(date: string, days: number): string {
 
 function previousInstant(instant: string): string {
   return new Date(Date.parse(instant) - 1).toISOString();
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

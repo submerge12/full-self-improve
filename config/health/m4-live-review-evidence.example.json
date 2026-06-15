@@ -1,0 +1,46 @@
+{
+  "contractStatus": "m4_live_review_pending_verification",
+  "evidenceMode": "live-review",
+  "windowsLogger": {
+    "contractStatus": "observed_live_alert_pending_review",
+    "evidenceMode": "live-observation",
+    "date": "2026-06-14",
+    "logger": {
+      "loggerId": "knowledge-loop-windows",
+      "startupObserved": true,
+      "startupCommand": "schtasks /Create /TN knowledge-loop-health-windows-logger /SC ONLOGON /TR \"npm exec tsx scripts/health-windows-logger.ts -- --config config/health/windows-logger.example.json\" /F",
+      "sleepWakeSurvived": true,
+      "version": "health-windows-logger/0.1.0"
+    },
+    "sedentaryStreak": {
+      "windowStart": "2026-06-14T08:00:00.000Z",
+      "windowEnd": "2026-06-14T09:05:00.000Z",
+      "durationMinutes": 65,
+      "source": "windows-logger:knowledge-loop-windows"
+    },
+    "breakReminder": {
+      "eligibleAt": "2026-06-14T09:00:00.000Z",
+      "recordedAt": "2026-06-14T09:03:00.000Z",
+      "deliveryChannel": "windows-notification",
+      "visibleAlertObserved": true
+    }
+  },
+  "coachDigest": {
+    "date": "2026-06-14",
+    "snapshotId": 1,
+    "boardUrl": "http://127.0.0.1:8080/issues/health-digest-1",
+    "publishedAt": "2026-06-14T20:00:00.000Z"
+  },
+  "compassHealthHashProof": {
+    "algorithm": "sha256",
+    "collectedOutsideHealthExtensions": true,
+    "before": {
+      "date": "2026-06-14",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "afterOneWeek": {
+      "date": "2026-06-21",
+      "hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  }
+}

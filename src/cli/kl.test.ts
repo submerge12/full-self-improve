@@ -1280,6 +1280,128 @@ describe("kl CLI handler", () => {
     ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
   });
 
+  test("health-live-evidence m4-review dry-run validates the example evidence", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "health-live-evidence",
+        "m4-review",
+        "--dry-run",
+        "--evidence",
+        "config/health/m4-live-review-evidence.example.json"
+      ],
+      { stdout: stdout.sink }
+    )) as KlHealthLiveEvidenceCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-live-evidence",
+      mode: "dry-run",
+      result: {
+        kind: "m4-review",
+        evidencePath: "config/health/m4-live-review-evidence.example.json",
+        status: "observed_evidence_valid",
+        valid: true,
+        validation: {
+          errors: [],
+          warnings: []
+        }
+      }
+    });
+  });
+
+  test("health-live-evidence m4-review returns blocked validation for invalid evidence", async () => {
+    const invalidEvidencePath = "config/health/m4-live-review-evidence.invalid.test.json";
+    writeFileSync(
+      invalidEvidencePath,
+      JSON.stringify(
+        {
+          contractStatus: "m4_complete",
+          evidenceMode: "live-review",
+          windowsLogger: {
+            contractStatus: "observed_live_alert_pending_review",
+            evidenceMode: "live-observation",
+            date: "2026-06-14",
+            logger: {
+              loggerId: "knowledge-loop-windows",
+              startupObserved: true,
+              startupCommand:
+                'schtasks /Create /TN knowledge-loop-health-windows-logger /SC ONLOGON /TR "npm exec tsx scripts/health-windows-logger.ts -- --config config/health/windows-logger.example.json" /F',
+              sleepWakeSurvived: true,
+              version: "health-windows-logger/0.1.0"
+            },
+            sedentaryStreak: {
+              windowStart: "2026-06-14T08:00:00.000Z",
+              windowEnd: "2026-06-14T09:05:00.000Z",
+              durationMinutes: 65,
+              source: "windows-logger:knowledge-loop-windows"
+            },
+            breakReminder: {
+              eligibleAt: "2026-06-14T09:00:00.000Z",
+              recordedAt: "2026-06-14T09:03:00.000Z",
+              deliveryChannel: "windows-notification",
+              visibleAlertObserved: false
+            }
+          },
+          coachDigest: {
+            date: "2026-06-14",
+            snapshotId: 1,
+            boardUrl: "http://127.0.0.1:8080/issues/health-digest-1",
+            publishedAt: "2026-06-14T20:00:00.000Z"
+          },
+          compassHealthHashProof: {
+            algorithm: "sha256",
+            collectedOutsideHealthExtensions: true,
+            before: {
+              date: "2026-06-14",
+              hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            },
+            afterOneWeek: {
+              date: "2026-06-21",
+              hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          }
+        },
+        null,
+        2
+      )
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "health-live-evidence",
+        "m4-review",
+        "--dry-run",
+        "--evidence",
+        invalidEvidencePath
+      ])) as KlHealthLiveEvidenceCommandResult;
+
+      expect(result.result.kind).toBe("m4-review");
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.errors).toEqual(
+        expect.arrayContaining([
+          "contractStatus must be m4_live_review_pending_verification",
+          "windowsLogger.breakReminder.visibleAlertObserved must be true for the live gate"
+        ])
+      );
+    } finally {
+      unlinkIfExists(invalidEvidencePath);
+    }
+  });
+
+  test("health-live-evidence m4-review enforces checkout-local evidence paths", async () => {
+    await expect(
+      handleKlCommand([
+        "health-live-evidence",
+        "m4-review",
+        "--dry-run",
+        "--evidence",
+        "..\\outside-m4-review.json"
+      ])
+    ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
+  });
+
   test("health-metric add creates a manual metric and writes health trace JSON", async () => {
     const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-add-")), "metrics.db");
     const stdout = createCapture();

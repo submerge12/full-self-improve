@@ -3,18 +3,37 @@ import { assertIsoDate, assertIsoInstant, assertSafeText } from "./schema.js";
 export interface HealthLiveEvidenceValidationResult {
   readonly errors: readonly string[];
   readonly warnings: readonly string[];
-  readonly summary?: {
-    readonly longestSedentaryMinutes: number;
-    readonly reminderDelayMinutes: number;
-    readonly liveGate: "windows_logger_alert_observed";
-  };
+  readonly summary?: WindowsLoggerLiveEvidenceSummary | M4LiveReviewEvidenceSummary;
+}
+
+interface WindowsLoggerLiveEvidenceSummary {
+  readonly longestSedentaryMinutes: number;
+  readonly reminderDelayMinutes: number;
+  readonly liveGate: "windows_logger_alert_observed";
+}
+
+interface M4LiveReviewEvidenceSummary {
+  readonly contractStatus: "m4_live_review_pending_verification";
+  readonly evidenceMode: "live-review";
+  readonly liveGate: "m4_live_review_pending_verification";
 }
 
 const EXPECTED_ROOT_KEYS = ["contractStatus", "evidenceMode", "date", "logger", "sedentaryStreak", "breakReminder"];
+const EXPECTED_M4_ROOT_KEYS = [
+  "contractStatus",
+  "evidenceMode",
+  "windowsLogger",
+  "coachDigest",
+  "compassHealthHashProof"
+];
 const EXPECTED_LOGGER_KEYS = ["loggerId", "startupObserved", "startupCommand", "sleepWakeSurvived", "version"];
 const EXPECTED_STREAK_KEYS = ["windowStart", "windowEnd", "durationMinutes", "source"];
 const EXPECTED_REMINDER_KEYS = ["eligibleAt", "recordedAt", "deliveryChannel", "visibleAlertObserved"];
-const FAKE_CLOSURE_FIELDS = new Set(["m4complete", "closed", "done"]);
+const EXPECTED_COACH_DIGEST_KEYS = ["date", "snapshotId", "boardUrl", "boardId", "publishedAt"];
+const EXPECTED_COMPASS_HASH_PROOF_KEYS = ["algorithm", "collectedOutsideHealthExtensions", "before", "afterOneWeek"];
+const EXPECTED_COMPASS_HASH_POINT_KEYS = ["date", "hash"];
+const FAKE_CLOSURE_FIELDS = new Set(["m4complete", "m4closed", "closed", "done"]);
+const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 export function validateWindowsLoggerLiveEvidence(value: unknown): HealthLiveEvidenceValidationResult {
   const errors: string[] = [];
@@ -46,6 +65,106 @@ export function validateWindowsLoggerLiveEvidence(value: unknown): HealthLiveEvi
       liveGate: "windows_logger_alert_observed"
     }
   };
+}
+
+export function validateM4LiveReviewEvidence(value: unknown): HealthLiveEvidenceValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  scanEvidence(value, "", errors, new WeakSet<object>());
+
+  const evidence = readObject(value, "evidence", errors);
+  if (evidence === undefined) {
+    return { errors, warnings };
+  }
+
+  rejectUnexpectedKeys(evidence, EXPECTED_M4_ROOT_KEYS, "", errors);
+  expectLiteral(evidence.contractStatus, "contractStatus", "m4_live_review_pending_verification", errors);
+  expectLiteral(evidence.evidenceMode, "evidenceMode", "live-review", errors);
+  validateNestedWindowsLogger(evidence.windowsLogger, errors);
+  validateCoachDigest(evidence.coachDigest, errors);
+  validateCompassHealthHashProof(evidence.compassHealthHashProof, errors);
+
+  if (errors.length > 0) {
+    return { errors, warnings };
+  }
+
+  return {
+    errors,
+    warnings,
+    summary: {
+      contractStatus: "m4_live_review_pending_verification",
+      evidenceMode: "live-review",
+      liveGate: "m4_live_review_pending_verification"
+    }
+  };
+}
+
+function validateNestedWindowsLogger(value: unknown, errors: string[]): void {
+  const nested = validateWindowsLoggerLiveEvidence(value);
+  errors.push(...nested.errors.map((error) => prefixNestedError("windowsLogger", error)));
+  if (nested.summary === undefined) {
+    errors.push("windowsLogger must contain valid Windows logger live alert evidence");
+  }
+}
+
+function validateCoachDigest(value: unknown, errors: string[]): void {
+  const digest = readObject(value, "coachDigest", errors);
+  if (digest === undefined) {
+    return;
+  }
+  rejectUnexpectedKeys(digest, EXPECTED_COACH_DIGEST_KEYS, "coachDigest", errors);
+  readIsoDate(digest.date, "coachDigest.date", errors);
+  readFiniteNumber(digest.snapshotId, "coachDigest.snapshotId", errors);
+  readIsoInstant(digest.publishedAt, "coachDigest.publishedAt", errors);
+
+  const hasBoardUrl = digest.boardUrl !== undefined;
+  const hasBoardId = digest.boardId !== undefined;
+  if (!hasBoardUrl && !hasBoardId) {
+    errors.push("coachDigest must include boardUrl or boardId");
+  }
+  if (hasBoardUrl) {
+    validateHttpUrl(readText(digest.boardUrl, "coachDigest.boardUrl", errors), "coachDigest.boardUrl", errors);
+  }
+  if (hasBoardId) {
+    validateBoardId(readText(digest.boardId, "coachDigest.boardId", errors), errors);
+  }
+}
+
+function validateCompassHealthHashProof(value: unknown, errors: string[]): void {
+  const proof = readObject(value, "compassHealthHashProof", errors);
+  if (proof === undefined) {
+    return;
+  }
+  rejectUnexpectedKeys(proof, EXPECTED_COMPASS_HASH_PROOF_KEYS, "compassHealthHashProof", errors);
+  expectLiteral(proof.algorithm, "compassHealthHashProof.algorithm", "sha256", errors);
+  if (proof.collectedOutsideHealthExtensions !== true) {
+    errors.push("compassHealthHashProof.collectedOutsideHealthExtensions must be true");
+  }
+
+  const before = readHashPoint(proof.before, "compassHealthHashProof.before", errors);
+  const afterOneWeek = readHashPoint(proof.afterOneWeek, "compassHealthHashProof.afterOneWeek", errors);
+  if (before.hash !== undefined && afterOneWeek.hash !== undefined && before.hash !== afterOneWeek.hash) {
+    errors.push("compassHealthHashProof.before.hash must match afterOneWeek.hash");
+  }
+  validateAtLeastSevenDaysApart(before.date, afterOneWeek.date, errors);
+}
+
+function readHashPoint(
+  value: unknown,
+  path: string,
+  errors: string[]
+): { readonly date?: string; readonly hash?: string } {
+  const point = readObject(value, path, errors);
+  if (point === undefined) {
+    return {};
+  }
+  rejectUnexpectedKeys(point, EXPECTED_COMPASS_HASH_POINT_KEYS, path, errors);
+  const date = readIsoDate(point.date, `${path}.date`, errors);
+  const hash = readText(point.hash, `${path}.hash`, errors);
+  if (hash !== undefined && !/^[a-f0-9]{64}$/i.test(hash)) {
+    errors.push(`${path}.hash must be a sha256 hex hash`);
+  }
+  return { date, hash };
 }
 
 function validateLogger(value: unknown, errors: string[]): string | undefined {
@@ -205,6 +324,55 @@ function readIsoInstant(value: unknown, path: string, errors: string[]): string 
   }
 }
 
+function readFiniteNumber(value: unknown, path: string, errors: string[]): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    errors.push(`${path} must be a finite number`);
+    return undefined;
+  }
+  return value;
+}
+
+function validateHttpUrl(value: string | undefined, path: string, errors: string[]): void {
+  if (value === undefined) {
+    return;
+  }
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      errors.push(`${path} must be an HTTP(S) URL`);
+    }
+    if (url.username.length > 0 || url.password.length > 0) {
+      errors.push(`${path} must not include credentials`);
+    }
+  } catch {
+    errors.push(`${path} must be an HTTP(S) URL`);
+  }
+}
+
+function validateBoardId(value: string | undefined, errors: string[]): void {
+  if (value === undefined) {
+    return;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) {
+    errors.push("coachDigest.boardId must be an ordinary board id");
+  }
+}
+
+function validateAtLeastSevenDaysApart(
+  beforeDate: string | undefined,
+  afterDate: string | undefined,
+  errors: string[]
+): void {
+  if (beforeDate === undefined || afterDate === undefined) {
+    return;
+  }
+  const beforeTime = Date.parse(`${beforeDate}T00:00:00.000Z`);
+  const afterTime = Date.parse(`${afterDate}T00:00:00.000Z`);
+  if (afterTime - beforeTime < SEVEN_DAYS_MS) {
+    errors.push("compassHealthHashProof dates must be at least seven days apart");
+  }
+}
+
 function expectLiteral(value: unknown, path: string, expected: string, errors: string[]): void {
   if (value !== expected) {
     errors.push(`${path} must be ${expected}`);
@@ -290,4 +458,23 @@ function hasFrozenRepositoryPath(value: string): boolean {
 
 function joinPath(parentPath: string, key: string): string {
   return parentPath.length === 0 ? key : `${parentPath}.${key}`;
+}
+
+function prefixNestedError(parentPath: string, error: string): string {
+  const fakeClosurePrefix = "fake closure field ";
+  if (error.startsWith(fakeClosurePrefix)) {
+    return `${fakeClosurePrefix}${parentPath}.${error.slice(fakeClosurePrefix.length)}`;
+  }
+
+  const secretSuffix = "secret-like value detected at ";
+  if (error.startsWith(secretSuffix)) {
+    return `${secretSuffix}${parentPath}.${error.slice(secretSuffix.length)}`;
+  }
+
+  const pathSuffix = "frozen repository filesystem path detected at ";
+  if (error.startsWith(pathSuffix)) {
+    return `${pathSuffix}${parentPath}.${error.slice(pathSuffix.length)}`;
+  }
+
+  return `${parentPath}.${error}`;
 }

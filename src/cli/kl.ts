@@ -141,6 +141,7 @@ import {
   type WindowsLoggerConfig
 } from "../health-extensions/windows-logger.js";
 import {
+  validateM4LiveReviewEvidence,
   validateWindowsLoggerLiveEvidence,
   type HealthLiveEvidenceValidationResult
 } from "../health-extensions/live-evidence.js";
@@ -341,7 +342,7 @@ export interface KlHealthLiveEvidenceCommandResult {
   readonly command: "health-live-evidence";
   readonly mode: "dry-run";
   readonly result: {
-    readonly kind: "windows-logger";
+    readonly kind: "windows-logger" | "m4-review";
     readonly evidencePath: string;
     readonly status: "observed_evidence_valid" | "blocked";
     readonly valid: boolean;
@@ -1533,41 +1534,49 @@ function runHealthWindowsLoggerStartupCommand(args: readonly string[]): KlHealth
 
 function runHealthLiveEvidenceCommand(args: readonly string[]): KlHealthLiveEvidenceCommandResult {
   const [kind, ...kindArgs] = args;
-  if (kind !== "windows-logger") {
-    throw new UsageError(`Command health-live-evidence requires kind windows-logger. Received "${kind ?? ""}".`);
+  if (kind !== "windows-logger" && kind !== "m4-review") {
+    throw new UsageError(
+      `Command health-live-evidence requires kind windows-logger or m4-review. Received "${kind ?? ""}".`
+    );
   }
 
+  const command = `health-live-evidence ${kind}`;
   const { dryRun, options } = parseFlaggedOptions(
     kindArgs,
     new Set(["--evidence"]),
-    "health-live-evidence windows-logger"
+    command
   );
   if (!dryRun) {
-    throw new UsageError("Command health-live-evidence windows-logger supports only --dry-run.");
+    throw new UsageError(`Command ${command} supports only --dry-run.`);
   }
 
-  const evidencePath = requireOne(options, "--evidence", "health-live-evidence windows-logger");
-  const { value, relativePath, errors } = loadCheckoutJsonForValidation(evidencePath, "Windows logger evidence");
-  const validation =
-    errors.length === 0
-      ? validateWindowsLoggerLiveEvidence(value)
-      : {
-          errors,
-          warnings: []
-        };
+  const evidencePath = requireOne(options, "--evidence", command);
+  const { value, relativePath, errors } = loadCheckoutJsonForValidation(evidencePath, healthLiveEvidenceLabel(kind));
+  const validation = errors.length === 0 ? validateHealthLiveEvidence(kind, value) : { errors, warnings: [] };
   const valid = validation.errors.length === 0;
 
   return {
     command: "health-live-evidence",
     mode: "dry-run",
     result: {
-      kind: "windows-logger",
+      kind,
       evidencePath: relativePath,
       status: valid ? "observed_evidence_valid" : "blocked",
       valid,
       validation
     }
   };
+}
+
+function healthLiveEvidenceLabel(kind: "windows-logger" | "m4-review"): string {
+  return kind === "windows-logger" ? "Windows logger evidence" : "M4 live review evidence";
+}
+
+function validateHealthLiveEvidence(
+  kind: "windows-logger" | "m4-review",
+  value: unknown
+): HealthLiveEvidenceValidationResult {
+  return kind === "windows-logger" ? validateWindowsLoggerLiveEvidence(value) : validateM4LiveReviewEvidence(value);
 }
 
 type ApplicationCliInput =

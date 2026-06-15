@@ -1,0 +1,8 @@
+{
+  "adapterId": "second-dataset",
+  "kind": "git-repo",
+  "rootEnv": "KNOWLEDGE_LOOP_GIT_REPO_ROOT",
+  "include": ["README.md", "docs/**", "src/**"],
+  "exclude": [".git/**", "**/node_modules/**", "**/dist/**", "**/.env*", "**/*secret*"],
+  "nonCompletionNotice": "This example documents the second adapter config shape. M5 genericity is only proven after a real or fixture second dataset ingest runs with zero src/engine diffs."
+}

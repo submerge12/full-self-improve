@@ -72,6 +72,45 @@ describe("adapter runtime config", () => {
 
     expect(refs.map((ref) => ref.path)).toEqual(["notes/kept.md", "published.md"]);
   });
+
+  test("registers a git repo adapter when configured", async () => {
+    const rootDir = await createVaultFixture();
+
+    const adapters = createConfiguredSourceAdapters({
+      KNOWLEDGE_LOOP_GIT_REPO_ROOT: rootDir
+    });
+
+    expect(adapters).toBeDefined();
+    expect(Object.keys(adapters ?? {})).toEqual(["git-repo"]);
+    expect(adapters?.["git-repo"]?.id).toBe("git-repo");
+    expect(adapters?.["git-repo"]?.kind).toBe("git-repo");
+  });
+
+  test("can register markdown and git repo adapters together", async () => {
+    const vaultRoot = await createVaultFixture();
+    const repoRoot = await createVaultFixture();
+
+    const adapters = createConfiguredSourceAdapters({
+      KNOWLEDGE_LOOP_VAULT_ROOT: vaultRoot,
+      KNOWLEDGE_LOOP_GIT_REPO_ROOT: repoRoot,
+      KNOWLEDGE_LOOP_GIT_REPO_ADAPTER_ID: "second-dataset"
+    });
+
+    expect(Object.keys(adapters ?? {}).sort()).toEqual(["holly-vault", "second-dataset"]);
+  });
+
+  test("passes git repo include and exclude env globs into the adapter", async () => {
+    const repoRoot = await createVaultFixture();
+
+    const adapters = createConfiguredSourceAdapters({
+      KNOWLEDGE_LOOP_GIT_REPO_ROOT: repoRoot,
+      KNOWLEDGE_LOOP_GIT_REPO_INCLUDE: " notes/**, published.md ",
+      KNOWLEDGE_LOOP_GIT_REPO_EXCLUDE: " **/draft-*, **/drafts/**, private/** "
+    });
+    const refs = await collectAsync(adapters?.["git-repo"]?.listDocuments());
+
+    expect(refs.map((ref) => ref.path)).toEqual(["published.md", "notes/kept.md"]);
+  });
 });
 
 async function createVaultFixture(): Promise<string> {

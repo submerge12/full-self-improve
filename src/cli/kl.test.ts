@@ -216,6 +216,7 @@ type HealthCountableTable =
   | "health_metric_audit_events"
   | "health_metric_imports"
   | "health_trace_events"
+  | "coach_digest_snapshots"
   | "exercise_templates"
   | "exercise_plans"
   | "exercise_sessions"
@@ -270,6 +271,27 @@ interface HealthBreakReminderCliCommandResult {
   mode: "mock-persistent";
   action: "evaluate";
   result: unknown;
+}
+
+interface HealthCoachDigestCliCommandResult {
+  command: "health-coach-digest";
+  mode: "dry-run";
+  result: {
+    snapshot: {
+      id: number;
+      date: string;
+      renderedMarkdown: string;
+      sourceHash: string;
+    };
+    renderedMarkdown: string;
+    sourceHash: string;
+    traceEvents: Array<{
+      runId: string;
+      stage: string;
+      timestamp: string;
+      dataJson: string;
+    }>;
+  };
 }
 
 const DOMAIN_COUNTABLE_TABLES = [
@@ -784,8 +806,161 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
+  });
+
+  test("health-coach-digest dry-run creates an offline snapshot on a new database without fetch", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-coach-digest-offline-")), "digest.db");
+    const stdout = createCapture();
+    const fetchCalls: FetchCall[] = [];
+    const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      fetchCalls.push({ input, init });
+      throw new Error("offline health-coach-digest must not fetch");
+    };
+
+    const result = (await handleKlCommand(
+      [
+        "health-coach-digest",
+        "--db",
+        dbPath,
+        "--date",
+        "2026-06-15",
+        "--dry-run",
+        "--offline",
+        "--compass-base-url",
+        "https://compass.example/root",
+        "--now",
+        "2026-06-15T12:34:56.000Z"
+      ],
+      { stdout: stdout.sink, fetch }
+    )) as unknown as HealthCoachDigestCliCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-coach-digest",
+      mode: "dry-run",
+      result: {
+        snapshot: {
+          date: "2026-06-15"
+        },
+        renderedMarkdown: expect.stringContaining("# Coach daily health digest"),
+        sourceHash: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+        traceEvents: [
+          {
+            runId: "health-coach-digest-cli-2026-06-15",
+            stage: "coach",
+            timestamp: "2026-06-15T12:34:56.000Z"
+          }
+        ]
+      }
+    });
+    expect(result.result.renderedMarkdown).toContain("- Availability: unavailable");
+    expect(fetchCalls).toEqual([]);
+    expect(existsSync(dbPath)).toBe(true);
+    expect(countHealthRows(dbPath, "coach_digest_snapshots")).toBe(1);
+    expect(countHealthRows(dbPath, "health_trace_events")).toBe(1);
+  });
+
+  test("health-coach-digest dry-run reads compass context over injected fetch without bearer headers", async () => {
+    const dbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-health-coach-digest-online-")), "digest.db");
+    const fetchCalls: FetchCall[] = [];
+    const fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      fetchCalls.push({ input, init });
+      return jsonResponse({ meals: [{ name: "Breakfast" }] });
+    };
+
+    const result = (await handleKlCommand(
+      [
+        "health-coach-digest",
+        "--db",
+        dbPath,
+        "--date",
+        "2026-06-15",
+        "--dry-run",
+        "--compass-base-url",
+        "https://compass.example/root"
+      ],
+      { fetch }
+    )) as unknown as HealthCoachDigestCliCommandResult;
+
+    expect(result.result.renderedMarkdown).toContain("- Availability: available");
+    expect(result.result.renderedMarkdown).toContain("- Meal entries: 1");
+    expect(fetchCalls.map((call) => String(call.input))).toEqual([
+      "https://compass.example/root/api/meal-plan/daily-context?date=2026-06-15"
+    ]);
+    expect(fetchCalls[0]?.init).toEqual({ method: "GET" });
+    expect(authorizationHeader(fetchCalls[0])).toBeUndefined();
+  });
+
+  test("health-coach-digest rejects missing duplicate unknown and live-publish options before creating a database", async () => {
+    const cases: Array<{
+      readonly name: string;
+      readonly argv: readonly string[];
+      readonly error: RegExp;
+    }> = [
+      {
+        name: "missing dry-run",
+        argv: ["--db", "{db}", "--date", "2026-06-15"],
+        error: /Command health-coach-digest requires --dry-run/
+      },
+      {
+        name: "duplicate dry-run",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--dry-run"],
+        error: /requires exactly one --dry-run flag/
+      },
+      {
+        name: "duplicate date",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--date", "2026-06-16", "--dry-run"],
+        error: /requires exactly one --date value/
+      },
+      {
+        name: "invalid date",
+        argv: ["--db", "{db}", "--date", "2026-02-31", "--dry-run"],
+        error: /Invalid --date value "2026-02-31"/
+      },
+      {
+        name: "invalid now",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--now", "2026-06-15"],
+        error: /Invalid --now value "2026-06-15"/
+      },
+      {
+        name: "offline value",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--offline", "true"],
+        error: /Unexpected positional argument for health-coach-digest: true/
+      },
+      {
+        name: "bad compass url",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--compass-base-url", "file:///tmp/compass"],
+        error: /Invalid --compass-base-url value/
+      },
+      {
+        name: "publish flag",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--publish"],
+        error: /Unknown option for health-coach-digest: --publish/
+      },
+      {
+        name: "live flag",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--live"],
+        error: /Unknown option for health-coach-digest: --live/
+      },
+      {
+        name: "snapshot id",
+        argv: ["--db", "{db}", "--date", "2026-06-15", "--dry-run", "--snapshot-id", "1"],
+        error: /Unknown option for health-coach-digest: --snapshot-id/
+      }
+    ];
+
+    for (const testCase of cases) {
+      const dbPath = path.join(
+        mkdtempSync(path.join(tmpdir(), `kl-cli-health-coach-digest-invalid-${testCase.name.replace(/\s+/g, "-")}-`)),
+        "missing.db"
+      );
+      const argv = testCase.argv.map((arg) => (arg === "{db}" ? dbPath : arg));
+
+      await expect(handleKlCommand(["health-coach-digest", ...argv])).rejects.toThrow(testCase.error);
+      expect(existsSync(dbPath)).toBe(false);
+    }
   });
 
   test("health-metric add creates a manual metric and writes health trace JSON", async () => {

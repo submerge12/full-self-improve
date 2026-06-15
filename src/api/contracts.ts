@@ -43,7 +43,8 @@ export const API_ROUTE_IDS = [
   "health.exercise.completion",
   "health.sedentary.spans.ingest",
   "health.sedentary.summary",
-  "health.break-reminders.evaluate"
+  "health.break-reminders.evaluate",
+  "health.coach-digest.generate"
 ] as const;
 
 export type ApiRouteId = (typeof API_ROUTE_IDS)[number];
@@ -210,6 +211,13 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/health/break-reminders/evaluate",
     auth: "bearer",
     description: "Evaluate whether the current sedentary streak is eligible for a break reminder."
+  },
+  {
+    id: "health.coach-digest.generate",
+    method: "POST",
+    path: "/api/health/coach-digest/generate",
+    auth: "bearer",
+    description: "Generate a dry-run coach digest snapshot from health extension data and optional compass context."
   }
 ] as const satisfies readonly ApiRouteManifestEntry[];
 

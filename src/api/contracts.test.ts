@@ -60,12 +60,18 @@ const expectedRoutes = [
     method: "POST",
     path: "/api/health/break-reminders/evaluate",
     auth: "bearer"
+  },
+  {
+    id: "health.coach-digest.generate",
+    method: "POST",
+    path: "/api/health/coach-digest/generate",
+    auth: "bearer"
   }
 ] as const;
 
 describe("API route manifest", () => {
   test("contains exactly the documented API endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(22);
+    expect(API_ROUTE_MANIFEST).toHaveLength(23);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -83,7 +89,7 @@ describe("API route manifest", () => {
   test("requires bearer auth for every mutation route", () => {
     const mutationRoutes = API_ROUTE_MANIFEST.filter((route) => route.method === "POST" || route.method === "PATCH");
 
-    expect(mutationRoutes).toHaveLength(15);
+    expect(mutationRoutes).toHaveLength(16);
     expect(mutationRoutes.every((route) => route.auth === "bearer")).toBe(true);
   });
 
@@ -161,6 +167,9 @@ describe("API route manifest", () => {
     expect(findApiRoute("POST", "/api/health/break-reminders/evaluate")?.id).toBe("health.break-reminders.evaluate");
     expect(findApiRoute("GET", "/api/health/break-reminders/evaluate")).toBeUndefined();
     expect(findApiRoute("POST", "/api/health/break-reminders/evaluate?mode=check")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/coach-digest/generate")?.id).toBe("health.coach-digest.generate");
+    expect(findApiRoute("GET", "/api/health/coach-digest/generate")).toBeUndefined();
+    expect(findApiRoute("POST", "/api/health/coach-digest/generate?date=2026-06-15")).toBeUndefined();
   });
 });
 

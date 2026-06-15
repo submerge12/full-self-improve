@@ -128,6 +128,10 @@ import {
   type BreakReminderEvaluationResult,
   type SedentarySummary
 } from "../health-extensions/sedentary.js";
+import {
+  generateCoachDigestSnapshot,
+  type CoachDigestSnapshotResult
+} from "../health-extensions/coach-digest.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -270,6 +274,12 @@ export interface KlHealthBreakReminderCommandResult {
   readonly mode: "mock-persistent";
   readonly action: "evaluate";
   readonly result: BreakReminderEvaluationResult;
+}
+
+export interface KlHealthCoachDigestCommandResult {
+  readonly command: "health-coach-digest";
+  readonly mode: "dry-run";
+  readonly result: CoachDigestSnapshotResult;
 }
 
 export interface KlAgentDryRunCommandResult {
@@ -460,6 +470,7 @@ export type KlCommandResult =
   | KlHealthExerciseCommandResult
   | KlHealthSedentaryCommandResult
   | KlHealthBreakReminderCommandResult
+  | KlHealthCoachDigestCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
@@ -517,6 +528,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runHealthBreakReminderCommand(args);
   }
 
+  if (command === "health-coach-digest") {
+    return runHealthCoachDigestCommand(args, io);
+  }
+
   if (command === "application") {
     return runApplicationCommand(args);
   }
@@ -562,7 +577,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -1287,6 +1302,48 @@ function runHealthBreakReminderCommand(args: readonly string[]): KlHealthBreakRe
   }
 }
 
+async function runHealthCoachDigestCommand(
+  args: readonly string[],
+  io: KlHandlerIO
+): Promise<KlHealthCoachDigestCommandResult> {
+  const { options, offline } = parseHealthCoachDigestOptions(args);
+  const dbPath = requireOne(options, "--db", "health-coach-digest");
+  const date = parseCliIsoDate(requireOne(options, "--date", "health-coach-digest"), "--date");
+  const nowValue = optionalOne(options, "--now", "health-coach-digest");
+  const now = nowValue === undefined ? undefined : parseCliIsoInstant(nowValue, "--now");
+  const compassBaseUrlValue = optionalOne(options, "--compass-base-url", "health-coach-digest");
+  const compassBaseUrl =
+    compassBaseUrlValue === undefined ? undefined : parseCliHttpBaseUrl(compassBaseUrlValue, "--compass-base-url");
+  const useCompass = !offline && compassBaseUrl !== undefined;
+  const db = new Database(dbPath);
+
+  try {
+    applyMigrations(db);
+    const result = await generateCoachDigestSnapshot(db, {
+      date,
+      offline: useCompass ? false : true,
+      runId: `health-coach-digest-cli-${date}`,
+      ...(now === undefined ? {} : { now }),
+      ...(useCompass
+        ? {
+            compass: {
+              baseUrl: compassBaseUrl,
+              fetch: io.fetch ?? globalThis.fetch
+            }
+          }
+        : {})
+    });
+
+    return {
+      command: "health-coach-digest",
+      mode: "dry-run",
+      result
+    };
+  } finally {
+    db.close();
+  }
+}
+
 type ApplicationCliInput =
   | {
       mode: "create";
@@ -1984,6 +2041,59 @@ function parseOptions(args: readonly string[], allowed: Set<string>, command: st
   }
 
   return options;
+}
+
+function parseHealthCoachDigestOptions(args: readonly string[]): {
+  offline: boolean;
+  options: Map<string, string[]>;
+} {
+  const allowed = new Set(["--db", "--date", "--compass-base-url", "--now"]);
+  const options = new Map<string, string[]>();
+  let dryRunCount = 0;
+  let offlineCount = 0;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const name = args[index];
+    const value = args[index + 1];
+
+    if (name === "--dry-run") {
+      dryRunCount += 1;
+      continue;
+    }
+    if (name === "--offline") {
+      offlineCount += 1;
+      continue;
+    }
+
+    if (name === undefined || !name.startsWith("--")) {
+      throw new UsageError(`Unexpected positional argument for health-coach-digest: ${name ?? ""}`);
+    }
+
+    if (!allowed.has(name)) {
+      throw new UsageError(`Unknown option for health-coach-digest: ${name}`);
+    }
+
+    if (value === undefined || value.startsWith("--")) {
+      throw new UsageError(`Option ${name} for health-coach-digest requires a value.`);
+    }
+
+    const values = options.get(name) ?? [];
+    values.push(value);
+    options.set(name, values);
+    index += 1;
+  }
+
+  if (dryRunCount === 0) {
+    throw new UsageError("Command health-coach-digest requires --dry-run.");
+  }
+  if (dryRunCount !== 1) {
+    throw new UsageError("Command health-coach-digest requires exactly one --dry-run flag.");
+  }
+  if (offlineCount > 1) {
+    throw new UsageError("Command health-coach-digest requires at most one --offline flag.");
+  }
+
+  return { offline: offlineCount === 1, options };
 }
 
 function parseAgentOptions(args: readonly string[]): { dryRun: boolean; options: Map<string, string[]> } {
@@ -2732,6 +2842,31 @@ function parseHttpEndpointOption(value: string, optionName: string): string {
   }
 
   return value;
+}
+
+function parseCliHttpBaseUrl(value: string, optionName: string): string {
+  const text = value.trim();
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    throw new UsageError(`Invalid ${optionName} value. Expected an http or https URL without credentials.`);
+  }
+
+  if (text.length === 0 || url.username.length > 0 || url.password.length > 0) {
+    throw new UsageError(`Invalid ${optionName} value. Expected an http or https URL without credentials.`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new UsageError(`Invalid ${optionName} value. Expected an http or https URL without credentials.`);
+  }
+
+  url.hash = "";
+  url.search = "";
+  if (!url.pathname.endsWith("/")) {
+    url.pathname = `${url.pathname}/`;
+  }
+
+  return url.toString();
 }
 
 function parseAgentFailureSmokeMethod(value: string): AgentEndpointPlan["method"] {

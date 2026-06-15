@@ -35,6 +35,7 @@ import {
   queryExerciseCompletion,
   type ExerciseTemplateDayInput
 } from "../health-extensions/exercise.js";
+import { generateCoachDigestSnapshot } from "../health-extensions/coach-digest.js";
 import {
   createHealthMetric,
   importHealthMetricsCsv,
@@ -166,6 +167,12 @@ interface HealthMetricImportBody {
   csvText: string;
 }
 
+interface HealthCoachDigestGenerateBody {
+  date: string;
+  offline?: boolean;
+  compassBaseUrl?: string;
+}
+
 interface ExerciseTemplateCreateBody {
   slug: string;
   name: string;
@@ -280,6 +287,8 @@ export async function handleApiRequest(
         return handleSedentarySummary(request, context);
       case "health.break-reminders.evaluate":
         return handleBreakReminderEvaluate(request, context);
+      case "health.coach-digest.generate":
+        return await handleHealthCoachDigestGenerate(request, context);
     }
   } catch (error) {
     if (error instanceof ApiBadRequestError || isRouteInputError(route.id, error)) {
@@ -506,6 +515,30 @@ function handleBreakReminderEvaluate(
   return successResponse("health.break-reminders.evaluate", { result });
 }
 
+async function handleHealthCoachDigestGenerate(
+  request: ApiRequest,
+  context: ApiHandlerContext
+): Promise<ApiResponse<ApiHandlerResponseBody>> {
+  const body = parseHealthCoachDigestGenerateBody(request.body);
+  const compassBaseUrl = body.offline === true ? undefined : body.compassBaseUrl;
+  const result = await generateCoachDigestSnapshot(context.db, {
+    date: body.date,
+    offline: compassBaseUrl === undefined,
+    now: nowDate(context).toISOString(),
+    runId: `health-coach-digest-api-${body.date}`,
+    ...(compassBaseUrl === undefined
+      ? {}
+      : {
+          compass: {
+            baseUrl: compassBaseUrl,
+            fetch: globalThis.fetch
+          }
+        })
+  });
+
+  return successResponse("health.coach-digest.generate", { result });
+}
+
 function runMutationWithTrace<T extends { traceEvents: readonly TraceEvent[] }>(
   db: Database.Database,
   mutation: () => T
@@ -657,6 +690,19 @@ function parseHealthMetricImportBody(body: unknown): HealthMetricImportBody {
   return {
     sourceFilename: requiredString(record, "sourceFilename"),
     csvText: requiredString(record, "csvText")
+  };
+}
+
+function parseHealthCoachDigestGenerateBody(body: unknown): HealthCoachDigestGenerateBody {
+  const record = parseBodyRecord(body);
+  const date = requiredIsoDateBody(record, "date");
+  const offline = optionalBoolean(record.offline, "offline");
+  const compassBaseUrl = optionalCompassBaseUrl(record.compassBaseUrl);
+
+  return {
+    date,
+    ...(offline === undefined ? {} : { offline }),
+    ...(compassBaseUrl === undefined ? {} : { compassBaseUrl })
   };
 }
 
@@ -1066,6 +1112,14 @@ function requiredIsoDateQuery(value: string | null, field: "from" | "to"): strin
   }
 }
 
+function requiredIsoDateBody(record: Record<string, unknown>, field: string): string {
+  try {
+    return assertIsoDate(requiredString(record, field), field);
+  } catch (error) {
+    throw new ApiBadRequestError(errorMessage(error));
+  }
+}
+
 function requiredIsoInstantQuery(value: string | null, field: "from" | "to", label: string): string {
   if (value === null || value.trim().length === 0) {
     throw new ApiBadRequestError(`${label} query parameter ${field} must be an ISO instant.`);
@@ -1138,6 +1192,40 @@ function optionalBooleanQuery(value: string | null, field: string): boolean | un
   }
 
   throw new ApiBadRequestError(`Sedentary summary query parameter ${field} must be true or false.`);
+}
+
+function optionalCompassBaseUrl(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "string") {
+    throw new ApiBadRequestError("Request body field compassBaseUrl must be an HTTP(S) URL without credentials.");
+  }
+
+  const text = value.trim();
+  if (text.length === 0) {
+    throw new ApiBadRequestError("Request body field compassBaseUrl must be an HTTP(S) URL without credentials.");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new ApiBadRequestError("Request body field compassBaseUrl must be an HTTP(S) URL without credentials.");
+  }
+
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new ApiBadRequestError("Request body field compassBaseUrl must be an HTTP(S) URL without credentials.");
+  }
+
+  parsed.hash = "";
+  parsed.search = "";
+  if (!parsed.pathname.endsWith("/")) {
+    parsed.pathname = `${parsed.pathname}/`;
+  }
+
+  return parsed.toString();
 }
 
 function requiredReviewRating(value: unknown): PersistentReviewRating {
@@ -1338,6 +1426,8 @@ function isRouteInputError(routeId: ApiRouteId, error: unknown): error is Error 
     case "health.sedentary.summary":
     case "health.break-reminders.evaluate":
       return isSedentaryInputError(error.message);
+    case "health.coach-digest.generate":
+      return isHealthCoachDigestInputError(error.message);
     default:
       return false;
   }
@@ -1445,6 +1535,10 @@ function isSedentaryInputError(message: string): boolean {
     /^(sourceId|spanStart|spanEnd|receivedAt|from|to|evaluatedAt|deliveryChannel) /.test(message) ||
     /^(confidence|thresholdMinutes|cooldownMinutes|activeBreakMinutes) must /.test(message)
   );
+}
+
+function isHealthCoachDigestInputError(message: string): boolean {
+  return message === "date must be an ISO date" || message === "now must be an ISO instant";
 }
 
 function isConceptNotFoundMessage(message: string): boolean {

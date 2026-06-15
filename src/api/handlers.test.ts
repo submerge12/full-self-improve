@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { createPage, createSourceWithChunk, recordMasteryUpdate } from "../db/content-store.js";
 import { createConcept } from "../db/graph-store.js";
@@ -81,6 +81,8 @@ describe("pure API request handlers", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
     db.close();
   });
 
@@ -165,6 +167,97 @@ describe("pure API request handlers", () => {
     expect(response.body).toMatchObject({ ok: true, routeId: "wiki.pages" });
     expect(data.pages).toHaveLength(1);
     expect(data.pages[0]).toMatchObject({ markdown: "Public page", visibility: "public" });
+  });
+
+  test("POST /api/health/coach-digest/generate creates an offline snapshot without fetching compass context", async () => {
+    const fetchSpy = vi.fn<typeof fetch>(async () => {
+      throw new Error("fetch should not be called in offline coach digest mode");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        offline: true,
+        compassBaseUrl: "https://compass.example/base/"
+      }),
+      context({ now: () => new Date("2026-06-15T12:34:56.000Z") })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "health.coach-digest.generate" });
+    const data = responseData<CoachDigestGenerateData>(response);
+    expect(data.result.snapshot).toMatchObject({
+      date: "2026-06-15",
+      renderedMarkdown: data.result.renderedMarkdown,
+      sourceHash: data.result.sourceHash
+    });
+    expect(data.result.renderedMarkdown).toContain("# Coach daily health digest");
+    expect(data.result.renderedMarkdown).toContain("- Availability: unavailable");
+    expect(data.result.sourceHash).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(data.result.traceEvents).toMatchObject([
+      {
+        runId: "health-coach-digest-api-2026-06-15",
+        stage: "coach",
+        message: "Coach digest snapshot generated",
+        timestamp: "2026-06-15T12:34:56.000Z"
+      }
+    ]);
+    expect(JSON.parse(data.result.traceEvents[0]!.dataJson)).toMatchObject({
+      date: "2026-06-15",
+      compassAvailable: false
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(countRows("coach_digest_snapshots")).toBe(1);
+    expect(countRows("health_trace_events")).toBe(1);
+  });
+
+  test("POST /api/health/coach-digest/generate reads compass context over fetch without bearer headers", async () => {
+    const fetchSpy = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ meals: [{ name: "Breakfast" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", {
+        date: "2026-06-15",
+        compassBaseUrl: "https://compass.example/root"
+      }),
+      context({ now: new Date("2026-06-15T12:34:56.000Z") })
+    );
+
+    expect(response.status).toBe(200);
+    const data = responseData<CoachDigestGenerateData>(response);
+    expect(data.result.renderedMarkdown).toContain("- Availability: available");
+    expect(data.result.renderedMarkdown).toContain("- Meal entries: 1");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(String(fetchSpy.mock.calls[0]![0])).toBe(
+      "https://compass.example/root/api/meal-plan/daily-context?date=2026-06-15"
+    );
+    expect(fetchSpy.mock.calls[0]![1]).toEqual({ method: "GET" });
+  });
+
+  test.each([
+    ["malformed date", { date: "2026-02-31" }],
+    ["non-boolean offline", { date: "2026-06-15", offline: "true" }],
+    ["blank compassBaseUrl", { date: "2026-06-15", compassBaseUrl: "   " }],
+    ["bad compassBaseUrl", { date: "2026-06-15", compassBaseUrl: "file:///tmp/compass" }]
+  ])("POST /api/health/coach-digest/generate rejects %s without partial writes", async (_name, body) => {
+    const response = await handleApiRequest(
+      authRequest("POST", "/api/health/coach-digest/generate", body),
+      context()
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "invalid_request_body", routeId: "health.coach-digest.generate" }
+    });
+    expect(countRows("coach_digest_snapshots")).toBe(0);
+    expect(countRows("health_trace_events")).toBe(0);
   });
 
   test("POST /api/health/metrics creates a manual metric with deterministic handler time", async () => {
@@ -1975,5 +2068,25 @@ interface BreakReminderEvaluateData extends Record<string, unknown> {
       reason: string;
       deliveryChannel?: string;
     };
+  };
+}
+
+interface CoachDigestGenerateData extends Record<string, unknown> {
+  result: {
+    snapshot: {
+      id: number;
+      date: string;
+      renderedMarkdown: string;
+      sourceHash: string;
+    };
+    renderedMarkdown: string;
+    sourceHash: string;
+    traceEvents: Array<{
+      runId: string;
+      stage: string;
+      message: string;
+      timestamp: string;
+      dataJson: string;
+    }>;
   };
 }

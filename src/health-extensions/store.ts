@@ -787,6 +787,40 @@ export function insertCoachDigestSnapshot(
   return mapCoachDigestSnapshotRow(row);
 }
 
+export function findCoachDigestSnapshotByDateAndSourceHash(
+  db: Database.Database,
+  date: string,
+  sourceHash: string
+): StoredCoachDigestSnapshot | undefined {
+  const row = db
+    .prepare(
+      `SELECT
+         id,
+         date,
+         metrics_summary_json,
+         exercise_summary_json,
+         sedentary_summary_json,
+         compass_context_json,
+         rendered_markdown,
+         source_hash,
+         published_at,
+         publish_result_json,
+         created_at,
+         updated_at
+       FROM coach_digest_snapshots
+       WHERE date = @date
+         AND source_hash = @sourceHash
+       ORDER BY id ASC
+       LIMIT 1`
+    )
+    .get({
+      date: assertIsoDate(date, "date"),
+      sourceHash: assertSafeText(sourceHash, "sourceHash")
+    }) as CoachDigestSnapshotRow | undefined;
+
+  return row === undefined ? undefined : mapCoachDigestSnapshotRow(row);
+}
+
 interface HealthMetricRow {
   readonly id: number;
   readonly metric_key: string;

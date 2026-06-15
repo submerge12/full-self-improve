@@ -1,0 +1,12 @@
+{
+  "loggerId": "knowledge-loop-windows",
+  "pollIntervalMs": 30000,
+  "idleThresholdMs": 60000,
+  "sleepWakeGapMs": 300000,
+  "heartbeatIntervalMs": 300000,
+  "healthApiBaseUrl": "http://127.0.0.1:3000",
+  "visibleAlert": {
+    "channel": "stdout",
+    "title": "Break reminder"
+  }
+}

@@ -4,10 +4,14 @@ import type { SedentarySpanIngestionInput } from "./sedentary.js";
 export interface WindowsLoggerHeartbeat {
   readonly sourceId: string;
   readonly heartbeatAt: string;
+  readonly kind?: WindowsLoggerHeartbeatKind;
   readonly loggerVersion?: string;
 }
 
+export type WindowsLoggerHeartbeatKind = "logger_heartbeat" | "logger_recovered_after_gap";
+
 const SEDENTARY_STATES: readonly SedentaryState[] = ["active", "idle", "unknown"];
+const HEARTBEAT_KINDS: readonly WindowsLoggerHeartbeatKind[] = ["logger_heartbeat", "logger_recovered_after_gap"];
 
 export function parseWindowsLoggerSpanPost(value: unknown): SedentarySpanIngestionInput {
   const payload = assertObjectPayload(value, "span payload");
@@ -33,6 +37,7 @@ export function parseWindowsLoggerHeartbeat(value: unknown): WindowsLoggerHeartb
   return {
     sourceId: assertPayloadText(payload.sourceId, "sourceId"),
     heartbeatAt: assertPayloadInstant(payload.heartbeatAt, "heartbeatAt"),
+    ...optionalHeartbeatKind(payload.kind),
     ...optionalText(payload.loggerVersion, "loggerVersion")
   };
 }
@@ -77,6 +82,16 @@ function optionalInstant(value: unknown, field: string): { readonly receivedAt?:
     return {};
   }
   return { receivedAt: assertPayloadInstant(value, field) };
+}
+
+function optionalHeartbeatKind(value: unknown): { readonly kind?: WindowsLoggerHeartbeatKind } {
+  if (value === undefined) {
+    return {};
+  }
+  if (typeof value !== "string" || !HEARTBEAT_KINDS.includes(value as WindowsLoggerHeartbeatKind)) {
+    throw new Error("kind must be logger_heartbeat or logger_recovered_after_gap");
+  }
+  return { kind: value as WindowsLoggerHeartbeatKind };
 }
 
 function optionalText(value: unknown, field: string): { readonly loggerVersion?: string } {

@@ -67,11 +67,13 @@ describe("Windows logger contract", () => {
       parseWindowsLoggerHeartbeat({
         sourceId: " windows-logger:host-1 ",
         heartbeatAt: "2026-06-15T02:00:00.000Z",
+        kind: "logger_recovered_after_gap",
         loggerVersion: " 0.4.0 "
       })
     ).toEqual({
       sourceId: "windows-logger:host-1",
       heartbeatAt: "2026-06-15T02:00:00.000Z",
+      kind: "logger_recovered_after_gap",
       loggerVersion: "0.4.0"
     });
   });
@@ -90,6 +92,13 @@ describe("Windows logger contract", () => {
         heartbeatAt: "2026-06-15"
       })
     ).toThrow("heartbeatAt must be an ISO instant");
+    expect(() =>
+      parseWindowsLoggerHeartbeat({
+        sourceId: "windows-logger:host-1",
+        heartbeatAt: "2026-06-15T02:00:00.000Z",
+        kind: "logger_paused"
+      })
+    ).toThrow("kind must be logger_heartbeat or logger_recovered_after_gap");
     expect(() =>
       parseWindowsLoggerHeartbeat({
         sourceId: "windows-logger:host-1",

@@ -24,6 +24,8 @@ import {
   type KlAgentScheduleDryRunCommandResult,
   type KlAgentScheduleLiveCommandResult,
   type KlCommandResult,
+  type KlHealthLiveEvidenceCommandResult,
+  type KlHealthWindowsLoggerCommandResult,
   type KlPersistentApplicationCommandResult,
   type KlPersistentQuizCommandResult,
   type KlPersistentReviewCommandResult,
@@ -806,7 +808,7 @@ function listTableNames(dbPath: string): string[] {
 describe("kl CLI handler", () => {
   test("unknown command lists diagnose and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
   });
 
@@ -961,6 +963,171 @@ describe("kl CLI handler", () => {
       await expect(handleKlCommand(["health-coach-digest", ...argv])).rejects.toThrow(testCase.error);
       expect(existsSync(dbPath)).toBe(false);
     }
+  });
+
+  test("health-windows-logger config-check validates the repo-owned example without exposing secrets", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "health-windows-logger",
+        "config-check",
+        "--config",
+        "config/health/windows-logger.example.json"
+      ],
+      { stdout: stdout.sink }
+    )) as KlHealthWindowsLoggerCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toEqual({
+      command: "health-windows-logger",
+      mode: "dry-run",
+      action: "config-check",
+      result: {
+        configPath: "config/health/windows-logger.example.json",
+        valid: true,
+        loggerId: "knowledge-loop-windows",
+        pollIntervalMs: 30_000,
+        idleThresholdMs: 60_000,
+        heartbeatIntervalMs: 300_000,
+        visibleAlertChannel: "stdout"
+      }
+    });
+  });
+
+  test("health-windows-logger startup-command renders schtasks without registering it", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "health-windows-logger",
+        "startup-command",
+        "--config",
+        "config/health/windows-logger.example.json",
+        "--script",
+        "scripts/health-windows-logger.ts"
+      ],
+      { stdout: stdout.sink }
+    )) as KlHealthWindowsLoggerCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-windows-logger",
+      mode: "dry-run",
+      action: "startup-command",
+      result: {
+        configPath: "config/health/windows-logger.example.json",
+        scriptPath: "scripts/health-windows-logger.ts"
+      }
+    });
+    if (result.action !== "startup-command") {
+      throw new Error("expected startup-command result");
+    }
+    expect(result.result.commandLine).toContain("schtasks /Create");
+    expect(result.result.commandLine).toContain("knowledge-loop-health-windows-logger");
+    expect(result.result.commandLine).toContain("scripts/health-windows-logger.ts");
+    expect(result.result.commandLine).toContain("config/health/windows-logger.example.json");
+  });
+
+  test("health-live-evidence windows-logger dry-run validates the example evidence", async () => {
+    const stdout = createCapture();
+    const result = (await handleKlCommand(
+      [
+        "health-live-evidence",
+        "windows-logger",
+        "--dry-run",
+        "--evidence",
+        "config/health/windows-logger-evidence.example.json"
+      ],
+      { stdout: stdout.sink }
+    )) as KlHealthLiveEvidenceCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "health-live-evidence",
+      mode: "dry-run",
+      result: {
+        kind: "windows-logger",
+        evidencePath: "config/health/windows-logger-evidence.example.json",
+        status: "observed_evidence_valid",
+        valid: true,
+        validation: {
+          errors: [],
+          warnings: [],
+          summary: {
+            longestSedentaryMinutes: 65,
+            reminderDelayMinutes: 3,
+            liveGate: "windows_logger_alert_observed"
+          }
+        }
+      }
+    });
+  });
+
+  test("health-live-evidence windows-logger reports blocked validation and enforces checkout-local paths", async () => {
+    const invalidEvidencePath = "config/health/windows-logger-evidence.invalid.test.json";
+    writeFileSync(
+      invalidEvidencePath,
+      JSON.stringify(
+        {
+          contractStatus: "observed_live_alert_pending_review",
+          evidenceMode: "live-observation",
+          date: "2026-06-14",
+          logger: {
+            loggerId: "knowledge-loop-windows",
+            startupObserved: false,
+            startupCommand: "schtasks /Create /TN knowledge-loop-health-windows-logger",
+            sleepWakeSurvived: true,
+            version: "health-windows-logger/0.1.0"
+          },
+          sedentaryStreak: {
+            windowStart: "2026-06-14T08:00:00.000Z",
+            windowEnd: "2026-06-14T08:59:00.000Z",
+            durationMinutes: 59,
+            source: "windows-logger:knowledge-loop-windows"
+          },
+          breakReminder: {
+            eligibleAt: "2026-06-14T09:00:00.000Z",
+            recordedAt: "2026-06-14T09:06:00.000Z",
+            deliveryChannel: "windows-notification",
+            visibleAlertObserved: false
+          }
+        },
+        null,
+        2
+      )
+    );
+
+    try {
+      const result = (await handleKlCommand([
+        "health-live-evidence",
+        "windows-logger",
+        "--dry-run",
+        "--evidence",
+        invalidEvidencePath
+      ])) as KlHealthLiveEvidenceCommandResult;
+
+      expect(result.result.status).toBe("blocked");
+      expect(result.result.valid).toBe(false);
+      expect(result.result.validation.errors).toEqual(
+        expect.arrayContaining([
+          "logger.startupObserved must be true for the live gate",
+          "sedentaryStreak.durationMinutes must be at least 60",
+          "breakReminder.recordedAt must be within 5 minutes of eligibleAt",
+          "breakReminder.visibleAlertObserved must be true for the live gate"
+        ])
+      );
+    } finally {
+      unlinkIfExists(invalidEvidencePath);
+    }
+
+    await expect(
+      handleKlCommand([
+        "health-live-evidence",
+        "windows-logger",
+        "--dry-run",
+        "--evidence",
+        "..\\outside.json"
+      ])
+    ).rejects.toThrow(/must stay inside the knowledge-loop checkout/);
   });
 
   test("health-metric add creates a manual metric and writes health trace JSON", async () => {

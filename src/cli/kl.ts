@@ -132,6 +132,15 @@ import {
   generateCoachDigestSnapshot,
   type CoachDigestSnapshotResult
 } from "../health-extensions/coach-digest.js";
+import {
+  loadWindowsLoggerConfig,
+  renderWindowsLoggerStartupCommand,
+  type WindowsLoggerConfig
+} from "../health-extensions/windows-logger.js";
+import {
+  validateWindowsLoggerLiveEvidence,
+  type HealthLiveEvidenceValidationResult
+} from "../health-extensions/live-evidence.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -280,6 +289,44 @@ export interface KlHealthCoachDigestCommandResult {
   readonly command: "health-coach-digest";
   readonly mode: "dry-run";
   readonly result: CoachDigestSnapshotResult;
+}
+
+export type KlHealthWindowsLoggerCommandResult =
+  | {
+      readonly command: "health-windows-logger";
+      readonly mode: "dry-run";
+      readonly action: "config-check";
+      readonly result: {
+        readonly configPath: string;
+        readonly valid: true;
+        readonly loggerId: string;
+        readonly pollIntervalMs: number;
+        readonly idleThresholdMs: number;
+        readonly heartbeatIntervalMs: number;
+        readonly visibleAlertChannel: WindowsLoggerConfig["visibleAlert"]["channel"];
+      };
+    }
+  | {
+      readonly command: "health-windows-logger";
+      readonly mode: "dry-run";
+      readonly action: "startup-command";
+      readonly result: {
+        readonly configPath: string;
+        readonly scriptPath: string;
+        readonly commandLine: string;
+      };
+    };
+
+export interface KlHealthLiveEvidenceCommandResult {
+  readonly command: "health-live-evidence";
+  readonly mode: "dry-run";
+  readonly result: {
+    readonly kind: "windows-logger";
+    readonly evidencePath: string;
+    readonly status: "observed_evidence_valid" | "blocked";
+    readonly valid: boolean;
+    readonly validation: HealthLiveEvidenceValidationResult;
+  };
 }
 
 export interface KlAgentDryRunCommandResult {
@@ -471,6 +518,8 @@ export type KlCommandResult =
   | KlHealthSedentaryCommandResult
   | KlHealthBreakReminderCommandResult
   | KlHealthCoachDigestCommandResult
+  | KlHealthWindowsLoggerCommandResult
+  | KlHealthLiveEvidenceCommandResult
   | KlAgentCommandResult
   | KlAgentDayCommandResult
   | KlAgentScheduleCommandResult
@@ -532,6 +581,14 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
     return runHealthCoachDigestCommand(args, io);
   }
 
+  if (command === "health-windows-logger") {
+    return runHealthWindowsLoggerCommand(args);
+  }
+
+  if (command === "health-live-evidence") {
+    return runHealthLiveEvidenceCommand(args);
+  }
+
   if (command === "application") {
     return runApplicationCommand(args);
   }
@@ -577,7 +634,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -1342,6 +1399,104 @@ async function runHealthCoachDigestCommand(
   } finally {
     db.close();
   }
+}
+
+function runHealthWindowsLoggerCommand(args: readonly string[]): KlHealthWindowsLoggerCommandResult {
+  const [action, ...actionArgs] = args;
+  if (action === "config-check") {
+    return runHealthWindowsLoggerConfigCheckCommand(actionArgs);
+  }
+  if (action === "startup-command") {
+    return runHealthWindowsLoggerStartupCommand(actionArgs);
+  }
+
+  throw new UsageError(
+    `Command health-windows-logger requires one action: config-check or startup-command. Received "${action ?? ""}".`
+  );
+}
+
+function runHealthWindowsLoggerConfigCheckCommand(args: readonly string[]): KlHealthWindowsLoggerCommandResult {
+  const options = parseOptions(args, new Set(["--config"]), "health-windows-logger config-check");
+  const configPath = requireOne(options, "--config", "health-windows-logger config-check");
+  const { value, relativePath } = loadCheckoutJson(configPath, "Windows logger config");
+  const config = loadWindowsLoggerConfig(value);
+
+  return {
+    command: "health-windows-logger",
+    mode: "dry-run",
+    action: "config-check",
+    result: {
+      configPath: relativePath,
+      valid: true,
+      loggerId: config.loggerId,
+      pollIntervalMs: config.pollIntervalMs,
+      idleThresholdMs: config.idleThresholdMs,
+      heartbeatIntervalMs: config.heartbeatIntervalMs,
+      visibleAlertChannel: config.visibleAlert.channel
+    }
+  };
+}
+
+function runHealthWindowsLoggerStartupCommand(args: readonly string[]): KlHealthWindowsLoggerCommandResult {
+  const options = parseOptions(args, new Set(["--config", "--script"]), "health-windows-logger startup-command");
+  const configPath = requireOne(options, "--config", "health-windows-logger startup-command");
+  const scriptPath = requireOne(options, "--script", "health-windows-logger startup-command");
+  const { value, relativePath: configRelativePath } = loadCheckoutJson(configPath, "Windows logger config");
+  loadWindowsLoggerConfig(value);
+  const { relativePath: scriptRelativePath } = resolveCheckoutFile(scriptPath, "Windows logger script");
+
+  return {
+    command: "health-windows-logger",
+    mode: "dry-run",
+    action: "startup-command",
+    result: {
+      configPath: configRelativePath,
+      scriptPath: scriptRelativePath,
+      commandLine: renderWindowsLoggerStartupCommand({
+        configPath: configRelativePath,
+        scriptPath: scriptRelativePath
+      })
+    }
+  };
+}
+
+function runHealthLiveEvidenceCommand(args: readonly string[]): KlHealthLiveEvidenceCommandResult {
+  const [kind, ...kindArgs] = args;
+  if (kind !== "windows-logger") {
+    throw new UsageError(`Command health-live-evidence requires kind windows-logger. Received "${kind ?? ""}".`);
+  }
+
+  const { dryRun, options } = parseFlaggedOptions(
+    kindArgs,
+    new Set(["--evidence"]),
+    "health-live-evidence windows-logger"
+  );
+  if (!dryRun) {
+    throw new UsageError("Command health-live-evidence windows-logger supports only --dry-run.");
+  }
+
+  const evidencePath = requireOne(options, "--evidence", "health-live-evidence windows-logger");
+  const { value, relativePath, errors } = loadCheckoutJsonForValidation(evidencePath, "Windows logger evidence");
+  const validation =
+    errors.length === 0
+      ? validateWindowsLoggerLiveEvidence(value)
+      : {
+          errors,
+          warnings: []
+        };
+  const valid = validation.errors.length === 0;
+
+  return {
+    command: "health-live-evidence",
+    mode: "dry-run",
+    result: {
+      kind: "windows-logger",
+      evidencePath: relativePath,
+      status: valid ? "observed_evidence_valid" : "blocked",
+      valid,
+      validation
+    }
+  };
 }
 
 type ApplicationCliInput =

@@ -32,6 +32,7 @@ Date: 2026-06-15
 
 ## Remaining live proof status
 
+- Final deterministic verification was run by the main thread after Task9 push on 2026-06-15 and passed: health-extension focused tests reported 9 files and 97 tests passed; API/CLI/agent deterministic tests reported 10 files and 334 tests passed; `npm run check` reported typecheck, lint, and unit tests passed with 49 files and 710 tests passed. This does not close M4.
 - Real Windows logger live alert evidence remains pending.
 - Coach Multica live publish evidence remains pending.
 - One-week compass-health hash proof remains pending.

@@ -651,6 +651,23 @@ function createTraceDb(): string {
   return dbPath;
 }
 
+function createBackupSourceDb(): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-db-backup-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    db.prepare(
+      `INSERT INTO sources (adapter_id, doc_ref, title, fingerprint, status)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run("m5-cli-drill", "README.md", "M5 CLI Drill", "sha256-cli-drill", "ingested");
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
 function createHealthMetricDb(): string {
   const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-db-"));
   const dbPath = path.join(dbDir, "metrics.db");
@@ -875,10 +892,82 @@ function listTableNames(dbPath: string): string[] {
 }
 
 describe("kl CLI handler", () => {
-  test("unknown command lists diagnose and agent as expected commands", async () => {
+  test("unknown command lists diagnose db-backup and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, db-backup, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
     );
+  });
+
+  test("db-backup create returns a manifest with a sha256 hash and writes JSON", async () => {
+    const dbPath = createBackupSourceDb();
+    const backupPath = path.join(path.dirname(dbPath), "backups", "knowledge-loop.backup.db");
+    const stdout = createCapture();
+
+    const result = await handleKlCommand(
+      ["db-backup", "create", "--db", dbPath, "--out", backupPath],
+      { stdout: stdout.sink }
+    );
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "db-backup",
+      action: "create",
+      result: {
+        sourcePath: path.resolve(dbPath),
+        backupPath: path.resolve(backupPath),
+        tableCounts: {
+          sources: 1
+        }
+      }
+    });
+    if (result.command !== "db-backup" || result.action !== "create") {
+      throw new Error("Expected db-backup create result.");
+    }
+    expect(result.result.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.result.byteSize).toBeGreaterThan(0);
+  });
+
+  test("db-backup restore-drill reports integrity for an existing backup", async () => {
+    const dbPath = createBackupSourceDb();
+    const backupPath = path.join(path.dirname(dbPath), "backups", "knowledge-loop.backup.db");
+    await handleKlCommand(["db-backup", "create", "--db", dbPath, "--out", backupPath]);
+
+    const result = await handleKlCommand(["db-backup", "restore-drill", "--backup", backupPath]);
+
+    expect(result).toMatchObject({
+      command: "db-backup",
+      action: "restore-drill",
+      result: {
+        backupPath: path.resolve(backupPath),
+        integrityOk: true,
+        tableCounts: {
+          sources: 1
+        }
+      }
+    });
+    if (result.command !== "db-backup" || result.action !== "restore-drill") {
+      throw new Error("Expected db-backup restore-drill result.");
+    }
+    expect(result.result.sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  test("db-backup rejects unknown actions and missing option values with usage errors", async () => {
+    await expect(handleKlCommand(["db-backup", "bogus"])).rejects.toThrow(
+      /Command db-backup requires one action: create or restore-drill/
+    );
+    await expect(handleKlCommand(["db-backup", "bogus"])).rejects.toHaveProperty("exitCode", 2);
+    await expect(handleKlCommand(["db-backup", "create", "--db"])).rejects.toThrow(
+      /Option --db for db-backup create requires a value/
+    );
+    await expect(handleKlCommand(["db-backup", "create", "--db"])).rejects.toHaveProperty("exitCode", 2);
+  });
+
+  test("db-backup create rejects source and destination resolving to the same path", async () => {
+    const dbPath = createBackupSourceDb();
+
+    await expect(
+      handleKlCommand(["db-backup", "create", "--db", dbPath, "--out", path.join(path.dirname(dbPath), ".", path.basename(dbPath))])
+    ).rejects.toThrow(/same path/i);
   });
 
   test("health-coach-digest dry-run creates an offline snapshot on a new database without fetch", async () => {

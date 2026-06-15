@@ -55,6 +55,12 @@ import {
   type PiHarnessModuleImporter
 } from "../agents/pi-harness-dependency.js";
 import { MarkdownVaultAdapter } from "../adapters/markdown-vault.js";
+import {
+  createSqliteBackup,
+  runSqliteRestoreDrill,
+  type SqliteBackupManifest,
+  type SqliteRestoreDrillResult
+} from "../db/backup.js";
 import { applyMigrations } from "../db/migrations.js";
 import { listTraceEvents, persistTraceEvents, type StoredTraceEvent } from "../db/trace-store.js";
 import {
@@ -256,6 +262,20 @@ export interface KlPersistentTraceCommandResult {
 }
 
 export type KlTraceCommandResult = KlPersistentTraceCommandResult;
+
+export type KlDbBackupCommandResult =
+  | {
+      readonly command: "db-backup";
+      readonly mode: "maintenance";
+      readonly action: "create";
+      readonly result: SqliteBackupManifest;
+    }
+  | {
+      readonly command: "db-backup";
+      readonly mode: "maintenance";
+      readonly action: "restore-drill";
+      readonly result: SqliteRestoreDrillResult;
+    };
 
 export interface KlHealthMetricCommandResult {
   readonly command: "health-metric";
@@ -534,6 +554,7 @@ export type KlCommandResult =
   | KlDiagnoseCommandResult
   | KlReviewCommandResult
   | KlTraceCommandResult
+  | KlDbBackupCommandResult
   | KlHealthMetricCommandResult
   | KlHealthExerciseCommandResult
   | KlHealthSedentaryCommandResult
@@ -580,6 +601,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
 
   if (command === "trace") {
     return runTraceCommand(args);
+  }
+
+  if (command === "db-backup") {
+    return runDbBackupCommand(args);
   }
 
   if (command === "health-metric") {
@@ -655,7 +680,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, db-backup, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -899,6 +924,35 @@ function runTraceCommand(args: readonly string[]): KlTraceCommandResult {
   } finally {
     db.close();
   }
+}
+
+async function runDbBackupCommand(args: readonly string[]): Promise<KlDbBackupCommandResult> {
+  const [action, ...actionArgs] = args;
+
+  if (action === "create") {
+    const options = parseOptions(actionArgs, new Set(["--db", "--out"]), "db-backup create");
+    return {
+      command: "db-backup",
+      mode: "maintenance",
+      action: "create",
+      result: await createSqliteBackup(
+        requireOne(options, "--db", "db-backup create"),
+        requireOne(options, "--out", "db-backup create")
+      )
+    };
+  }
+
+  if (action === "restore-drill") {
+    const options = parseOptions(actionArgs, new Set(["--backup"]), "db-backup restore-drill");
+    return {
+      command: "db-backup",
+      mode: "maintenance",
+      action: "restore-drill",
+      result: runSqliteRestoreDrill(requireOne(options, "--backup", "db-backup restore-drill"))
+    };
+  }
+
+  throw new UsageError(`Command db-backup requires one action: create or restore-drill. Received "${action ?? ""}".`);
 }
 
 function runHealthMetricCommand(args: readonly string[]): KlHealthMetricCommandResult {

@@ -1,5 +1,9 @@
 # M5 Genericity And Polish Implementation Plan
 
+## Status Update - 2026-06-16
+
+Task 1 through Task 4 are complete and recorded in `docs/reviews/M5.md` plus the four M5 checkpoints: `part-m5-second-adapter-genericity-proof`, `part-m5-backup-restore-drill`, `part-m5-ops-dashboard`, and `part-m5-review-note`. M5 deterministic evidence is complete. M5 does not close M1/M2/M3/M4 live gates or Section 0 closure gates.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Close the M5 development work by proving knowledge-loop can ingest a non-Holly dataset through a second adapter with zero `src/engine/` changes, then add backup/restore drill support and a small operational dashboard.
@@ -84,7 +88,7 @@ M5 does not close earlier live gates:
 - Create: `docs/reviews/M5.md`
 - Create: `.ai/checkpoints/part-m5-second-adapter-genericity-proof/step-1.md`
 
-- [ ] **Step 1: Write failing GitRepoAdapter conformance tests**
+- [x] **Step 1: Write failing GitRepoAdapter conformance tests**
 
 Add `src/adapters/git-repo.test.ts` with this shape:
 
@@ -220,7 +224,7 @@ async function ignoreMissing(removePath: () => Promise<void>): Promise<void> {
 }
 ```
 
-- [ ] **Step 2: Run RED test**
+- [x] **Step 2: Run RED test**
 
 Run:
 
@@ -230,7 +234,7 @@ npm run test:unit -- src/adapters/git-repo.test.ts
 
 Expected: FAIL because `src/adapters/git-repo.ts` does not exist or does not export `GitRepoAdapter`.
 
-- [ ] **Step 3: Implement GitRepoAdapter**
+- [x] **Step 3: Implement GitRepoAdapter**
 
 Create `src/adapters/git-repo.ts`. It must:
 
@@ -255,7 +259,7 @@ export interface GitRepoAdapterOptions {
 }
 ```
 
-- [ ] **Step 4: Run GREEN adapter tests**
+- [x] **Step 4: Run GREEN adapter tests**
 
 Run:
 
@@ -265,7 +269,7 @@ npm run test:unit -- src/adapters/git-repo.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Write failing runtime config tests**
+- [x] **Step 5: Write failing runtime config tests**
 
 Extend `src/adapters/config.test.ts` with tests for `KNOWLEDGE_LOOP_GIT_REPO_ROOT`:
 
@@ -310,7 +314,7 @@ test("passes git repo include and exclude env globs into the adapter", async () 
 });
 ```
 
-- [ ] **Step 6: Run RED config tests**
+- [x] **Step 6: Run RED config tests**
 
 Run:
 
@@ -320,7 +324,7 @@ npm run test:unit -- src/adapters/config.test.ts
 
 Expected: FAIL because git repo env registration is not implemented.
 
-- [ ] **Step 7: Implement adapter runtime config**
+- [x] **Step 7: Implement adapter runtime config**
 
 Modify `src/adapters/config.ts`:
 
@@ -335,7 +339,7 @@ Modify `src/adapters/config.ts`:
 
 Do not modify any file in `src/engine/`.
 
-- [ ] **Step 8: Run GREEN adapter/config tests**
+- [x] **Step 8: Run GREEN adapter/config tests**
 
 Run:
 
@@ -345,7 +349,7 @@ npm run test:unit -- src/adapters/git-repo.test.ts src/adapters/config.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 9: Add example config and M5 pending review note**
+- [x] **Step 9: Add example config and M5 pending review note**
 
 Create `config/adapters/git-repo.example.json`:
 
@@ -390,7 +394,7 @@ M5 development is in progress. This note must not mark M5 complete until the sec
 - M4 live Windows logger, Coach publish, and one-week compass-health hash proof remain outside this note until recorded in `docs/reviews/M4.md`.
 ```
 
-- [ ] **Step 10: Run second dataset persistent ingest proof**
+- [x] **Step 10: Run second dataset persistent ingest proof**
 
 Use a scratch second dataset under `.ai/tmp/part-m5-second-adapter-genericity-proof/second-dataset`. Create files one at a time with normal file writes from the worker, not recursive delete commands.
 
@@ -405,7 +409,7 @@ Run a small TypeScript proof script through `npx tsx -e` or an equivalent tempor
 
 Expected: at least one source processed, zero source failures, at least one concept, at least one page.
 
-- [ ] **Step 11: Record zero engine diff proof**
+- [x] **Step 11: Record zero engine diff proof**
 
 Run:
 
@@ -425,7 +429,7 @@ Expected code proof: the only code/config files needed for the genericity proof 
 
 Expected documentation/checkpoint proof: `docs/reviews/M5.md` and `.ai/checkpoints/part-m5-second-adapter-genericity-proof/step-1.md` may also appear in the task diff, but they are evidence records, not part of the strict genericity code proof.
 
-- [ ] **Step 12: Write checkpoint**
+- [x] **Step 12: Write checkpoint**
 
 Create `.ai/checkpoints/part-m5-second-adapter-genericity-proof/step-1.md` with:
 
@@ -458,7 +462,7 @@ Date: 2026-06-15
 
 Do not write synthetic or expected values in this checkpoint; record only the observed command output summaries from this task run.
 
-- [ ] **Step 13: Run broader checks**
+- [x] **Step 13: Run broader checks**
 
 Run:
 
@@ -469,7 +473,7 @@ npm run check
 
 Expected: PASS.
 
-- [ ] **Step 14: Commit and push this slice**
+- [x] **Step 14: Commit and push this slice**
 
 After reviewers approve:
 
@@ -496,7 +500,7 @@ Expected: commit and push succeed.
 - Modify: `docs/reviews/M5.md`
 - Create: `.ai/checkpoints/part-m5-backup-restore-drill/step-1.md`
 
-- [ ] **Step 1: Write failing backup domain tests**
+- [x] **Step 1: Write failing backup domain tests**
 
 Create `src/db/backup.test.ts` covering:
 
@@ -508,7 +512,7 @@ Create `src/db/backup.test.ts` covering:
 
 Use scratch files under `tmpdir()` and clean up one explicit file path at a time with `unlink`/`rmdir`, not recursive deletion.
 
-- [ ] **Step 2: Run RED backup tests**
+- [x] **Step 2: Run RED backup tests**
 
 Run:
 
@@ -518,7 +522,7 @@ npm run test:unit -- src/db/backup.test.ts
 
 Expected: FAIL because `src/db/backup.ts` does not exist.
 
-- [ ] **Step 3: Implement backup helpers**
+- [x] **Step 3: Implement backup helpers**
 
 Create `src/db/backup.ts` with:
 
@@ -552,7 +556,7 @@ Implementation rules:
 - do not modify source DB during restore drill.
 - include a WAL-mode regression test where a committed row survives backup and restore drill.
 
-- [ ] **Step 4: Run GREEN backup tests**
+- [x] **Step 4: Run GREEN backup tests**
 
 Run:
 
@@ -562,7 +566,7 @@ npm run test:unit -- src/db/backup.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Write failing CLI tests**
+- [x] **Step 5: Write failing CLI tests**
 
 Extend `src/cli/kl.test.ts`:
 
@@ -571,7 +575,7 @@ Extend `src/cli/kl.test.ts`:
 - unknown action and missing values throw `UsageError`;
 - source and destination same path is rejected.
 
-- [ ] **Step 6: Run RED CLI tests**
+- [x] **Step 6: Run RED CLI tests**
 
 Run:
 
@@ -581,7 +585,7 @@ npm run test:unit -- src/cli/kl.test.ts
 
 Expected: FAIL because `db-backup` command is not implemented.
 
-- [ ] **Step 7: Implement CLI command**
+- [x] **Step 7: Implement CLI command**
 
 Modify `src/cli/kl.ts`:
 
@@ -592,7 +596,7 @@ Modify `src/cli/kl.ts`:
 - implement `db-backup create --db` with a caller-provided source SQLite path and `--out` with a caller-provided backup path;
 - implement `db-backup restore-drill --backup` with a caller-provided backup path.
 
-- [ ] **Step 8: Add runbook and update M5 review**
+- [x] **Step 8: Add runbook and update M5 review**
 
 Create `docs/runbooks/m5-backup-restore.md` with exact commands. The runbook must include a prep step that creates and migrates the scratch DB before backup. Use a repo-local helper command or an `npx tsx -e` command equivalent to:
 
@@ -609,11 +613,11 @@ npm run kl -- db-backup restore-drill --backup .ai/tmp/m5/backups/knowledge-loop
 
 Update `docs/reviews/M5.md` backup section from pending implementation to deterministic evidence once tests and a scratch restore drill pass.
 
-- [ ] **Step 9: Write checkpoint**
+- [x] **Step 9: Write checkpoint**
 
 Create `.ai/checkpoints/part-m5-backup-restore-drill/step-1.md` recording RED/GREEN tests, CLI smoke, backup manifest hash, restore drill integrity, and remaining M5 work.
 
-- [ ] **Step 10: Run checks**
+- [x] **Step 10: Run checks**
 
 Run:
 
@@ -624,7 +628,7 @@ npm run check
 
 Expected: PASS.
 
-- [ ] **Step 11: Commit and push this slice**
+- [x] **Step 11: Commit and push this slice**
 
 After reviewers approve:
 
@@ -657,7 +661,7 @@ Expected: commit and push succeed.
 - Modify: `docs/reviews/M5.md`
 - Create: `.ai/checkpoints/part-m5-ops-dashboard/step-1.md`
 
-- [ ] **Step 1: Write failing dashboard domain tests**
+- [x] **Step 1: Write failing dashboard domain tests**
 
 Create `src/ops/dashboard.test.ts` proving a migrated scratch DB returns:
 
@@ -667,7 +671,7 @@ Create `src/ops/dashboard.test.ts` proving a migrated scratch DB returns:
 - `generatedAt` from injected clock;
 - no writes by checking counts before and after.
 
-- [ ] **Step 2: Run RED dashboard tests**
+- [x] **Step 2: Run RED dashboard tests**
 
 Run:
 
@@ -677,7 +681,7 @@ npm run test:unit -- src/ops/dashboard.test.ts
 
 Expected: FAIL because `src/ops/dashboard.ts` does not exist.
 
-- [ ] **Step 3: Implement dashboard summary builder**
+- [x] **Step 3: Implement dashboard summary builder**
 
 Create `src/ops/dashboard.ts` with:
 
@@ -700,7 +704,7 @@ export function buildOpsDashboardSummary(
 
 Implementation must use read-only `SELECT` statements and no mutations.
 
-- [ ] **Step 4: Run GREEN dashboard domain tests**
+- [x] **Step 4: Run GREEN dashboard domain tests**
 
 Run:
 
@@ -710,7 +714,7 @@ npm run test:unit -- src/ops/dashboard.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Write failing API/CLI/route tests**
+- [x] **Step 5: Write failing API/CLI/route tests**
 
 Add tests for:
 
@@ -719,7 +723,7 @@ Add tests for:
 - route wrapper in `src/app/api/_shared/route-adapter.test.ts`;
 - `npm run kl -- ops-dashboard --db .ai/tmp/m5/knowledge-loop.db` result shape in `src/cli/kl.test.ts`.
 
-- [ ] **Step 6: Run RED integration tests**
+- [x] **Step 6: Run RED integration tests**
 
 Run:
 
@@ -729,7 +733,7 @@ npm run test:unit -- src/api/contracts.test.ts src/api/handlers.test.ts src/app/
 
 Expected: FAIL because dashboard API/CLI wiring is not implemented.
 
-- [ ] **Step 7: Implement API, route, and CLI wiring**
+- [x] **Step 7: Implement API, route, and CLI wiring**
 
 Modify:
 
@@ -738,7 +742,7 @@ Modify:
 - `src/app/api/ops/dashboard/route.ts`: export `GET` through `createApiRouteHandler("GET", "/api/ops/dashboard")`, `runtime = "nodejs"`.
 - `src/cli/kl.ts`: add `ops-dashboard --db` with a caller-provided SQLite path.
 
-- [ ] **Step 8: Add dashboard runbook and update M5 review**
+- [x] **Step 8: Add dashboard runbook and update M5 review**
 
 Create `docs/runbooks/m5-ops-dashboard.md` with:
 
@@ -748,11 +752,11 @@ npm run kl -- ops-dashboard --db .ai/tmp/m5/knowledge-loop.db
 
 Update `docs/reviews/M5.md` dashboard section with deterministic API/CLI evidence.
 
-- [ ] **Step 9: Write checkpoint**
+- [x] **Step 9: Write checkpoint**
 
 Create `.ai/checkpoints/part-m5-ops-dashboard/step-1.md` with RED/GREEN tests, handler/route/CLI coverage, and remaining M5 closure items.
 
-- [ ] **Step 10: Run checks**
+- [x] **Step 10: Run checks**
 
 Run:
 
@@ -763,7 +767,7 @@ npm run check
 
 Expected: PASS.
 
-- [ ] **Step 11: Commit and push this slice**
+- [x] **Step 11: Commit and push this slice**
 
 After reviewers approve:
 
@@ -785,7 +789,7 @@ Expected: commit and push succeed.
 - Modify: `docs/reviews/M5.md`
 - Create: `.ai/checkpoints/part-m5-review-note/step-1.md`
 
-- [ ] **Step 1: Run final deterministic verification**
+- [x] **Step 1: Run final deterministic verification**
 
 Run:
 
@@ -802,7 +806,7 @@ Expected:
 - `git diff -- src/engine` has no output for M5 genericity proof;
 - no `docs/AUDIT-MANUAL.md` changes are staged.
 
-- [ ] **Step 2: Update M5 review note**
+- [x] **Step 2: Update M5 review note**
 
 Modify `docs/reviews/M5.md`:
 
@@ -812,11 +816,11 @@ Modify `docs/reviews/M5.md`:
 - list dashboard API/CLI proof;
 - explicitly state any remaining live/human gates from M1-M4 are not closed by M5.
 
-- [ ] **Step 3: Write checkpoint**
+- [x] **Step 3: Write checkpoint**
 
 Create `.ai/checkpoints/part-m5-review-note/step-1.md` recording final deterministic verification commands and results.
 
-- [ ] **Step 4: Commit and push this slice**
+- [x] **Step 4: Commit and push this slice**
 
 After reviewers approve:
 

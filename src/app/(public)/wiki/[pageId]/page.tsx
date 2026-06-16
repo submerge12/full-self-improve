@@ -24,13 +24,13 @@ export default async function PublicWikiDetailPage({ params }: PublicWikiDetailP
     <article>
       <header>
         <h1>{page.conceptName}</h1>
-        <p>Version {page.version}</p>
+        <p>版本 {page.version}</p>
       </header>
 
       <pre>{page.markdown}</pre>
 
       <section aria-labelledby="provenance-heading">
-        <h2 id="provenance-heading">Provenance</h2>
+        <h2 id="provenance-heading">来源依据</h2>
         <ol>
           {page.citations.map((citation) => (
             <li key={citation.chunkId}>

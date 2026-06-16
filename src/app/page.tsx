@@ -1,14 +1,14 @@
 export default function HomePage() {
   return (
     <section>
-      <h1>Knowledge Loop</h1>
-      <p>Learning workspace backed by the local knowledge-loop database.</p>
+      <h1>知识循环</h1>
+      <p>由本地 knowledge-loop 数据库驱动的学习工作台。</p>
       <ul>
         <li>
-          <a href="/learn">Open learning dashboard</a>
+          <a href="/learn">打开学习面板</a>
         </li>
         <li>
-          <a href="/wiki">Browse public wiki</a>
+          <a href="/wiki">浏览公开知识库</a>
         </li>
       </ul>
     </section>

@@ -7,9 +7,9 @@ export default function PublicWikiPage() {
 
   return (
     <section>
-      <h1>Public wiki</h1>
+      <h1>公开知识库</h1>
       {pages.length === 0 ? (
-        <p>No public wiki pages exist yet.</p>
+        <p>还没有公开知识库页面。</p>
       ) : (
         <ul>
           {pages.map((page) => (
@@ -19,7 +19,7 @@ export default function PublicWikiPage() {
                   <a href={`/wiki/${page.id}`}>{page.conceptName}</a>
                 </h2>
                 <p>{page.excerpt}</p>
-                <p>Version {page.version}</p>
+                <p>版本 {page.version}</p>
               </article>
             </li>
           ))}

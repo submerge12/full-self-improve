@@ -72,12 +72,18 @@ const expectedRoutes = [
     method: "POST",
     path: "/api/health/coach-digest/publish",
     auth: "bearer"
+  },
+  {
+    id: "ops.dashboard",
+    method: "GET",
+    path: "/api/ops/dashboard",
+    auth: "bearer"
   }
 ] as const;
 
 describe("API route manifest", () => {
   test("contains exactly the documented API endpoints", () => {
-    expect(API_ROUTE_MANIFEST).toHaveLength(24);
+    expect(API_ROUTE_MANIFEST).toHaveLength(25);
     expect(
       API_ROUTE_MANIFEST.map((route) => ({
         id: route.id,
@@ -101,6 +107,8 @@ describe("API route manifest", () => {
 
   test("findApiRoute returns a matching route and is method-sensitive", () => {
     expect(findApiRoute("GET", "/api/plan/today")?.id).toBe("plan.today");
+    expect(findApiRoute("GET", "/api/ops/dashboard")?.id).toBe("ops.dashboard");
+    expect(findApiRoute("POST", "/api/ops/dashboard")).toBeUndefined();
     expect(findApiRoute("POST", "/api/plan/today")).toBeUndefined();
     expect(findApiRoute("GET", "/api/not-real")).toBeUndefined();
   });

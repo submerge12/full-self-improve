@@ -169,6 +169,68 @@ describe("pure API request handlers", () => {
     expect(data.pages[0]).toMatchObject({ markdown: "Public page", visibility: "public" });
   });
 
+  test("GET /api/ops/dashboard returns a read-only dashboard summary for bearer-authenticated requests", async () => {
+    const concept = createConcept(db, { slug: "ops-topic", name: "Ops Topic", status: "generated" });
+    const { chunk } = createSourceWithChunk(db, {
+      adapterId: "ops-fixture",
+      docRef: "ops.md",
+      title: "Ops",
+      fingerprint: "ops-fingerprint",
+      chunkText: "Ops dashboard fixture."
+    });
+    createPage(db, {
+      conceptId: concept.id,
+      version: 1,
+      markdown: "Ops dashboard page",
+      citationIds: [chunk.id],
+      visibility: "public"
+    });
+    recordMasteryUpdate(db, {
+      conceptId: concept.id,
+      score: 0.5,
+      confidence: 0.7,
+      attemptsN: 2,
+      lastSeenAt: "2026-06-15T11:00:00.000Z"
+    });
+    const beforeCounts = countDashboardTables();
+
+    const response = await handleApiRequest(
+      authRequest("GET", "/api/ops/dashboard"),
+      context({ now: () => new Date("2026-06-15T12:00:00.000Z") })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ ok: true, routeId: "ops.dashboard" });
+    const data = responseData<OpsDashboardData>(response);
+    expect(data.summary).toMatchObject({
+      generatedAt: "2026-06-15T12:00:00.000Z",
+      tableCounts: {
+        sources: 1,
+        chunks: 1,
+        concepts: 1,
+        pages: 1,
+        mastery: 1,
+        trace_events: 0
+      },
+      sourceAdapters: [{ adapterId: "ops-fixture", sourceCount: 1, failedCount: 0 }],
+      publicPageCount: 1,
+      privatePageCount: 0,
+      masteryCount: 1,
+      recentTraceEventCount: 0
+    });
+    expect(countDashboardTables()).toEqual(beforeCounts);
+  });
+
+  test("GET /api/ops/dashboard rejects unauthenticated requests with its route id", async () => {
+    const response = await handleApiRequest(request("GET", "/api/ops/dashboard"), context());
+
+    expect(response.status).toBe(401);
+    expect(response.body).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "ops.dashboard" }
+    });
+  });
+
   test("POST /api/health/coach-digest/generate creates an offline snapshot without fetching compass context", async () => {
     const fetchSpy = vi.fn<typeof fetch>(async () => {
       throw new Error("fetch should not be called in offline coach digest mode");
@@ -1894,6 +1956,12 @@ describe("pure API request handlers", () => {
     return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
   }
 
+  function countDashboardTables(): Record<string, number> {
+    return Object.fromEntries(
+      ["sources", "chunks", "concepts", "pages", "mastery", "trace_events"].map((table) => [table, countRows(table)])
+    );
+  }
+
   function readCoachDigestSnapshot(snapshotId: number): {
     publishedAt: string | null;
     publishResultJson: string | null;
@@ -2042,6 +2110,18 @@ interface MasterySummaryData extends Record<string, unknown> {
   diagnosis: {
     runId: string;
     weakSpots: unknown[];
+  };
+}
+
+interface OpsDashboardData extends Record<string, unknown> {
+  summary: {
+    generatedAt: string;
+    tableCounts: Record<string, number>;
+    sourceAdapters: Array<{ adapterId: string; sourceCount: number; failedCount: number }>;
+    publicPageCount: number;
+    privatePageCount: number;
+    masteryCount: number;
+    recentTraceEventCount: number;
   };
 }
 

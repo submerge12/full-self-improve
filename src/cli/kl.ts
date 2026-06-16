@@ -151,6 +151,7 @@ import {
   validateWindowsLoggerLiveEvidence,
   type HealthLiveEvidenceValidationResult
 } from "../health-extensions/live-evidence.js";
+import { buildOpsDashboardSummary, type OpsDashboardSummary } from "../ops/dashboard.js";
 
 export interface WritableSink {
   write(chunk: string | Uint8Array): unknown;
@@ -276,6 +277,12 @@ export type KlDbBackupCommandResult =
       readonly action: "restore-drill";
       readonly result: SqliteRestoreDrillResult;
     };
+
+export interface KlOpsDashboardCommandResult {
+  readonly command: "ops-dashboard";
+  readonly mode: "mock-persistent";
+  readonly result: OpsDashboardSummary;
+}
 
 export interface KlHealthMetricCommandResult {
   readonly command: "health-metric";
@@ -555,6 +562,7 @@ export type KlCommandResult =
   | KlReviewCommandResult
   | KlTraceCommandResult
   | KlDbBackupCommandResult
+  | KlOpsDashboardCommandResult
   | KlHealthMetricCommandResult
   | KlHealthExerciseCommandResult
   | KlHealthSedentaryCommandResult
@@ -605,6 +613,10 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
 
   if (command === "db-backup") {
     return runDbBackupCommand(args);
+  }
+
+  if (command === "ops-dashboard") {
+    return runOpsDashboardCommand(args);
   }
 
   if (command === "health-metric") {
@@ -680,7 +692,7 @@ export async function runKlCommand(argv: readonly string[], io: KlHandlerIO = {}
   }
 
   throw new UsageError(
-    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, db-backup, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
+    `Unknown command "${command ?? ""}". Expected one of: ingest, plan, quiz, teachback, diagnose, trace, db-backup, ops-dashboard, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke, agent-harness-dependency.`
   );
 }
 
@@ -953,6 +965,22 @@ async function runDbBackupCommand(args: readonly string[]): Promise<KlDbBackupCo
   }
 
   throw new UsageError(`Command db-backup requires one action: create or restore-drill. Received "${action ?? ""}".`);
+}
+
+function runOpsDashboardCommand(args: readonly string[]): KlOpsDashboardCommandResult {
+  const options = parseOptions(args, new Set(["--db"]), "ops-dashboard");
+  const dbPath = requireOne(options, "--db", "ops-dashboard");
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+
+  try {
+    return {
+      command: "ops-dashboard",
+      mode: "mock-persistent",
+      result: buildOpsDashboardSummary(db)
+    };
+  } finally {
+    db.close();
+  }
 }
 
 function runHealthMetricCommand(args: readonly string[]): KlHealthMetricCommandResult {

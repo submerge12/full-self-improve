@@ -28,6 +28,7 @@ import { POST as applicationGradePost, runtime as applicationGradeRuntime } from
 import { GET as reviewDueGet, runtime as reviewDueRuntime } from "../review/due/route.js";
 import { POST as reviewAttemptPost, runtime as reviewAttemptRuntime } from "../review/attempt/route.js";
 import { GET as wikiPagesGet, runtime as wikiPagesRuntime } from "../wiki/pages/route.js";
+import { GET as opsDashboardGet, runtime as opsDashboardRuntime } from "../ops/dashboard/route.js";
 
 describe("Next app route adapter", () => {
   const originalEnv = { ...process.env };
@@ -168,6 +169,7 @@ describe("Next app route adapter", () => {
     expect(reviewDueGet).toEqual(expect.any(Function));
     expect(reviewAttemptPost).toEqual(expect.any(Function));
     expect(wikiPagesGet).toEqual(expect.any(Function));
+    expect(opsDashboardGet).toEqual(expect.any(Function));
   });
 
   test("actual health route modules export the expected HTTP method functions", async () => {
@@ -214,6 +216,7 @@ describe("Next app route adapter", () => {
     expect(reviewDueRuntime).toBe("nodejs");
     expect(reviewAttemptRuntime).toBe("nodejs");
     expect(wikiPagesRuntime).toBe("nodejs");
+    expect(opsDashboardRuntime).toBe("nodejs");
   });
 
   test("actual health route modules force the Node.js runtime", async () => {
@@ -318,10 +321,27 @@ describe("Next app route adapter", () => {
       applicationTaskResponse,
       applicationGradeResponse,
       reviewDueResponse,
-      reviewAttemptResponse
+      reviewAttemptResponse,
+      await opsDashboardGet(
+        new Request("https://example.test/api/ops/dashboard", {
+          headers: { authorization: "Bearer env-secret" }
+        })
+      )
     ];
 
-    expect(responses.map((response) => response.status)).toEqual([200, 200, 200, 200, 200, 200, 200, 200, 200, 200]);
+    expect(responses.map((response) => response.status)).toEqual([
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ]);
     await expectResponseRouteIds(responses, [
       "ingest.run",
       "plan.today",
@@ -332,8 +352,56 @@ describe("Next app route adapter", () => {
       "application.task.create",
       "application.grade",
       "review.due",
-      "review.attempt"
+      "review.attempt",
+      "ops.dashboard"
     ]);
+  });
+
+  test("actual ops dashboard route rejects unauthenticated requests without creating a missing DB", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-ops-dashboard-auth-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const response = await opsDashboardGet(new Request("https://example.test/api/ops/dashboard"));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      error: { code: "unauthorized", routeId: "ops.dashboard" }
+    });
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  test("actual ops dashboard route reads an existing DB without mutating dashboard rows", async () => {
+    const dbPath = path.join(os.tmpdir(), `knowledge-loop-route-adapter-ops-dashboard-readonly-${Date.now()}.db`);
+    tempFiles.push(dbPath);
+    seedOpsDashboardRouteData(dbPath);
+    const beforeRows = readDashboardRouteRows(dbPath);
+    process.env.KNOWLEDGE_LOOP_DB_PATH = dbPath;
+    process.env.KNOWLEDGE_LOOP_API_TOKEN = "env-secret";
+
+    const response = await opsDashboardGet(
+      new Request("https://example.test/api/ops/dashboard", {
+        headers: { authorization: "Bearer env-secret" }
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      routeId: "ops.dashboard",
+      data: {
+        summary: {
+          tableCounts: {
+            sources: 1,
+            chunks: 1,
+            trace_events: 1
+          }
+        }
+      }
+    });
+    expect(readDashboardRouteRows(dbPath)).toEqual(beforeRows);
   });
 
   test("actual health route modules accept bearer-authenticated Web requests", async () => {
@@ -950,6 +1018,43 @@ function seedAuthenticatedRouteData(dbPath: string): void {
       fsrsState: { reviewCount: 0 },
       dueAt: "2026-06-14T00:00:00.000Z"
     });
+  } finally {
+    db.close();
+  }
+}
+
+function seedOpsDashboardRouteData(dbPath: string): void {
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    const source = db
+      .prepare(
+        `INSERT INTO sources (adapter_id, doc_ref, title, fingerprint, status)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run("ops-route", "ops.md", "Ops", "ops-route-fingerprint", "ingested");
+    db.prepare(
+      `INSERT INTO chunks (source_id, seq, text, meta)
+       VALUES (?, ?, ?, ?)`
+    ).run(source.lastInsertRowid, 1, "Ops dashboard route fixture.", "{}");
+    db.prepare(
+      `INSERT INTO trace_events (run_id, stage, level, message, timestamp, data)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run("ops-route-run", "plan", "info", "Ops dashboard route trace.", "2026-06-15T12:00:00.000Z", "null");
+  } finally {
+    db.close();
+  }
+}
+
+function readDashboardRouteRows(dbPath: string): Record<string, number> {
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  try {
+    return Object.fromEntries(
+      ["sources", "chunks", "concepts", "pages", "mastery", "trace_events"].map((table) => {
+        const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
+        return [table, row.count];
+      })
+    );
   } finally {
     db.close();
   }

@@ -45,7 +45,8 @@ export const API_ROUTE_IDS = [
   "health.sedentary.summary",
   "health.break-reminders.evaluate",
   "health.coach-digest.generate",
-  "health.coach-digest.publish"
+  "health.coach-digest.publish",
+  "ops.dashboard"
 ] as const;
 
 export type ApiRouteId = (typeof API_ROUTE_IDS)[number];
@@ -226,6 +227,13 @@ export const API_ROUTE_MANIFEST = [
     path: "/api/health/coach-digest/publish",
     auth: "bearer",
     description: "Publish an existing coach digest snapshot to the configured board, or preview the publish action."
+  },
+  {
+    id: "ops.dashboard",
+    method: "GET",
+    path: "/api/ops/dashboard",
+    auth: "bearer",
+    description: "Return a read-only operational dashboard summary for the current SQLite database."
   }
 ] as const satisfies readonly ApiRouteManifestEntry[];
 

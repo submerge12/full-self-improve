@@ -30,6 +30,8 @@ export interface WebApiRouteOptions {
   readonly method: ApiMethod;
   readonly path: string;
   readonly contextFactory?: RuntimeApiContextFactory;
+  readonly authorizeBeforeContext?: boolean;
+  readonly expectedBearerToken?: () => string | undefined;
   readonly handleRequest?: (
     request: ApiRequest,
     context: ApiHandlerContext
@@ -58,15 +60,41 @@ export function createApiRouteHandler(method: ApiMethod, path: string): AppRoute
   return (request) => handleWebApiRequest(request, { method, path });
 }
 
+export function createReadOnlyApiRouteHandler(method: ApiMethod, path: string): AppRouteHandler {
+  return (request) =>
+    handleWebApiRequest(request, {
+      method,
+      path,
+      authorizeBeforeContext: true,
+      expectedBearerToken: () => process.env.KNOWLEDGE_LOOP_API_TOKEN,
+      contextFactory: createReadOnlyRuntimeApiContext
+    });
+}
+
 export async function handleWebApiRequest(request: Request, options: WebApiRouteOptions): Promise<Response> {
+  const path = pathWithSearch(options.path, request.url);
+  const headers = headersToRecord(request.headers);
+
+  if (options.authorizeBeforeContext === true) {
+    const authResponse = authorizeWebRequest(
+      options.method,
+      path,
+      headers,
+      options.expectedBearerToken?.()
+    );
+    if (authResponse !== undefined) {
+      return Response.json(authResponse.body, { status: authResponse.status });
+    }
+  }
+
   const runtime = (options.contextFactory ?? createRuntimeApiContext)();
 
   try {
-    const path = pathWithSearch(options.path, request.url);
-    const headers = headersToRecord(request.headers);
-    const authResponse = authorizeWebRequest(options.method, path, headers, runtime.context.expectedBearerToken);
-    if (authResponse !== undefined) {
-      return Response.json(authResponse.body, { status: authResponse.status });
+    if (options.authorizeBeforeContext !== true) {
+      const authResponse = authorizeWebRequest(options.method, path, headers, runtime.context.expectedBearerToken);
+      if (authResponse !== undefined) {
+        return Response.json(authResponse.body, { status: authResponse.status });
+      }
     }
 
     const body = await requestBody(request);
@@ -114,6 +142,24 @@ export function createRuntimeApiContext(): RuntimeApiContext {
         db,
         expectedBearerToken: process.env.KNOWLEDGE_LOOP_API_TOKEN,
         adapters
+      },
+      close: () => db.close()
+    };
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
+
+export function createReadOnlyRuntimeApiContext(): RuntimeApiContext {
+  const db = new Database(resolveRuntimeDbPath(), { readonly: true, fileMustExist: true });
+
+  try {
+    runtimeApiContextTestHooks.afterOpen?.(db);
+    return {
+      context: {
+        db,
+        expectedBearerToken: process.env.KNOWLEDGE_LOOP_API_TOKEN
       },
       close: () => db.close()
     };

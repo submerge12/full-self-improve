@@ -66,6 +66,7 @@ import {
   type StoredSedentarySpan
 } from "../health-extensions/schema.js";
 import { parseWindowsLoggerSpanPost } from "../health-extensions/windows-logger-contract.js";
+import { buildOpsDashboardSummary } from "../ops/dashboard.js";
 
 export interface ApiRequest {
   readonly method: ApiMethod;
@@ -324,6 +325,8 @@ export async function handleApiRequest(
         return await handleHealthCoachDigestGenerate(request, context);
       case "health.coach-digest.publish":
         return await handleHealthCoachDigestPublish(request, context);
+      case "ops.dashboard":
+        return handleOpsDashboard(context);
     }
   } catch (error) {
     if (error instanceof ApiBadRequestError || isRouteInputError(route.id, error)) {
@@ -442,6 +445,13 @@ function handleReviewAttempt(request: ApiRequest, context: ApiHandlerContext): A
   const result = runMutationWithTrace(context.db, () => recordPersistentReviewAttempt(context.db, body));
 
   return successResponse("review.attempt", { result });
+}
+
+function handleOpsDashboard(context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {
+  const now = nowDate(context);
+  const summary = buildOpsDashboardSummary(context.db, { now: () => now });
+
+  return successResponse("ops.dashboard", { summary });
 }
 
 function handleHealthMetricCreate(request: ApiRequest, context: ApiHandlerContext): ApiResponse<ApiHandlerResponseBody> {

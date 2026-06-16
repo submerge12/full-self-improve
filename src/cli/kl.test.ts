@@ -26,6 +26,7 @@ import {
   type KlCommandResult,
   type KlHealthLiveEvidenceCommandResult,
   type KlHealthWindowsLoggerCommandResult,
+  type KlOpsDashboardCommandResult,
   type KlPersistentApplicationCommandResult,
   type KlPersistentQuizCommandResult,
   type KlPersistentReviewCommandResult,
@@ -668,6 +669,49 @@ function createBackupSourceDb(): string {
   return dbPath;
 }
 
+function createOpsDashboardDb(): string {
+  const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-ops-dashboard-"));
+  const dbPath = path.join(dbDir, "knowledge-loop.db");
+  const db = new Database(dbPath);
+  try {
+    applyMigrations(db);
+    const concept = createConcept(db, { slug: "ops-dashboard", name: "Ops Dashboard", status: "generated" });
+    const { chunk } = createSourceWithChunk(db, {
+      adapterId: "ops-cli",
+      docRef: "ops.md",
+      title: "Ops",
+      fingerprint: "ops-cli-fingerprint",
+      chunkText: "Ops dashboard CLI fixture."
+    });
+    createPage(db, {
+      conceptId: concept.id,
+      version: 1,
+      markdown: "Ops dashboard CLI page",
+      citationIds: [chunk.id],
+      visibility: "private"
+    });
+    recordMasteryUpdate(db, {
+      conceptId: concept.id,
+      score: 0.4,
+      confidence: 0.6,
+      attemptsN: 1,
+      lastSeenAt: "2026-06-15T11:00:00.000Z"
+    });
+    persistTraceEvent(db, {
+      runId: "ops-cli-run",
+      stage: "plan",
+      level: "info",
+      message: "Ops CLI trace",
+      timestamp: "2026-06-15T11:30:00.000Z",
+      data: { fixture: true }
+    });
+  } finally {
+    db.close();
+  }
+
+  return dbPath;
+}
+
 function createHealthMetricDb(): string {
   const dbDir = mkdtempSync(path.join(tmpdir(), "kl-cli-health-metric-db-"));
   const dbPath = path.join(dbDir, "metrics.db");
@@ -892,9 +936,64 @@ function listTableNames(dbPath: string): string[] {
 }
 
 describe("kl CLI handler", () => {
-  test("unknown command lists diagnose db-backup and agent as expected commands", async () => {
+  test("unknown command lists diagnose db-backup ops-dashboard and agent as expected commands", async () => {
     await expect(handleKlCommand(["unknown"])).rejects.toThrow(
-      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, db-backup, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+      /Expected one of: ingest, plan, quiz, teachback, diagnose, trace, db-backup, ops-dashboard, health-metric, health-exercise, health-sedentary, health-break-reminder, health-coach-digest, health-windows-logger, health-live-evidence, application, review, agent, agent-day, agent-schedule, agent-live-smoke, agent-preflight, agent-board-config, agent-board-evidence, agent-failure-smoke/
+    );
+  });
+
+  test("ops-dashboard with a db returns the summary and writes JSON", async () => {
+    const dbPath = createOpsDashboardDb();
+    const stdout = createCapture();
+
+    const result = (await handleKlCommand(["ops-dashboard", "--db", dbPath], {
+      stdout: stdout.sink
+    })) as KlOpsDashboardCommandResult;
+
+    expect(parseCapturedJson(stdout)).toEqual(result);
+    expect(result).toMatchObject({
+      command: "ops-dashboard",
+      mode: "mock-persistent",
+      result: {
+        tableCounts: {
+          sources: 1,
+          chunks: 1,
+          concepts: 1,
+          pages: 1,
+          mastery: 1,
+          trace_events: 1
+        },
+        sourceAdapters: [{ adapterId: "ops-cli", sourceCount: 1, failedCount: 0 }],
+        publicPageCount: 0,
+        privatePageCount: 1,
+        masteryCount: 1,
+        recentTraceEventCount: expect.any(Number)
+      }
+    });
+    expect(result.result.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  test("ops-dashboard rejects a missing db without creating it", async () => {
+    const missingDbPath = path.join(mkdtempSync(path.join(tmpdir(), "kl-cli-ops-dashboard-missing-")), "missing.db");
+
+    await expect(handleKlCommand(["ops-dashboard", "--db", missingDbPath])).rejects.toThrow();
+
+    expect(existsSync(missingDbPath)).toBe(false);
+  });
+
+  test("ops-dashboard rejects missing duplicate db and unknown options", async () => {
+    const dbPath = createOpsDashboardDb();
+    const otherDbPath = path.join(path.dirname(dbPath), "other.db");
+
+    await expect(handleKlCommand(["ops-dashboard"])).rejects.toThrow(/requires exactly one --db/);
+    await expect(handleKlCommand(["ops-dashboard", "--db"])).rejects.toThrow(
+      /Option --db for ops-dashboard requires a value/
+    );
+    await expect(handleKlCommand(["ops-dashboard", "--db", dbPath, "--db", otherDbPath])).rejects.toThrow(
+      /requires exactly one --db/
+    );
+    await expect(handleKlCommand(["ops-dashboard", "--db", dbPath, "--bogus", "1"])).rejects.toThrow(
+      /Unknown option for ops-dashboard: --bogus/
     );
   });
 
